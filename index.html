@@ -1,0 +1,1297 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CReuse 管理后台</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
+</head>
+<body class="bg-gray-50">
+  <nav class="bg-white shadow-sm border-b">
+    <div class="max-w-[1440px] mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="flex justify-between h-16 items-center">
+        <h1 class="text-2xl font-bold text-red-600">CReuse 管理后台</h1>
+        <div class="flex items-center space-x-4">
+          <span class="text-sm text-gray-700" id="adminName">管理员</span>
+          <button onclick="logout()" class="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700">
+            <i class="fas fa-sign-out-alt mr-2"></i>退出登录
+          </button>
+        </div>
+      </div>
+    </div>
+  </nav>
+
+  <div id="loginModal" class="fixed inset-0 bg-gray-700/50 flex items-center justify-center z-50">
+    <div class="bg-white rounded-xl shadow-xl p-8 max-w-md w-full mx-4">
+      <h2 class="text-2xl font-bold mb-6 text-center">管理员登录</h2>
+      <div class="mb-4">
+        <label class="block text-gray-700 mb-2">邮箱</label>
+        <input id="loginEmail" type="email" class="w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500" placeholder="admin@example.com" />
+      </div>
+      <div class="mb-6">
+        <label class="block text-gray-700 mb-2">密码</label>
+        <input id="loginPassword" type="password" class="w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500" placeholder="输入密码" />
+      </div>
+      <button onclick="login()" class="w-full bg-red-600 text-white py-3 rounded-lg hover:bg-red-700 font-semibold">登录</button>
+      <p class="text-sm text-gray-500 mt-4 text-center">仅允许 <code>isAdmin = true</code> 账户登录</p>
+    </div>
+  </div>
+
+  <div id="mainContent" class="hidden">
+    <div class="flex">
+      <aside class="w-64 shrink-0 bg-white border-r h-[calc(100vh-64px)] sticky top-16 overflow-y-auto">
+        <nav class="py-4">
+          <a href="#" onclick="showSection('dashboard')" class="menu-item active"><i class="fas fa-chart-line mr-3"></i>数据统计</a>
+          <a href="#" onclick="showSection('users')" class="menu-item"><i class="fas fa-users mr-3"></i>用户管理</a>
+          <a href="#" onclick="showSection('reports')" class="menu-item"><i class="fas fa-flag mr-3"></i>举报处理</a>
+          <a href="#" onclick="showSection('feedbacks')" class="menu-item"><i class="fas fa-bug mr-3"></i>反馈管理</a>
+          <a href="#" onclick="showSection('items')" class="menu-item"><i class="fas fa-box mr-3"></i>商品管理</a>
+          <a href="#" onclick="showSection('orders')" class="menu-item"><i class="fas fa-receipt mr-3"></i>订单管理</a>
+          <a href="#" onclick="showSection('transactions')" class="menu-item"><i class="fas fa-money-bill-wave mr-3"></i>交易管理</a>
+          <a href="#" onclick="showSection('disputes')" class="menu-item"><i class="fas fa-scale-balanced mr-3"></i>纠纷处理</a>
+          <a href="#" onclick="showSection('offline')" class="menu-item"><i class="fas fa-truck-fast mr-3"></i>线下服务</a>
+          <a href="#" onclick="showSection('commercialization')" class="menu-item"><i class="fas fa-coins mr-3"></i>商业化管理</a>
+          <a href="#" onclick="showSection('config')" class="menu-item"><i class="fas fa-sliders mr-3"></i>系统配置</a>
+          <a href="#" onclick="showSection('logs')" class="menu-item"><i class="fas fa-shield-alt mr-3"></i>操作日志</a>
+        </nav>
+      </aside>
+
+      <main class="flex-1 min-w-0 p-6 lg:p-8 space-y-8">
+        <section id="dashboardSection" class="section">
+          <div class="flex justify-between items-center mb-6">
+            <h2 class="text-3xl font-bold">数据统计</h2>
+            <div class="flex gap-2">
+              <select id="dashboardRange" class="input w-[180px]">
+                <option value="today">今日</option>
+                <option value="7d">近7天</option>
+                <option value="30d">近30天</option>
+                <option value="month">本月</option>
+                <option value="custom">自定义</option>
+              </select>
+              <input id="dashboardDateFrom" type="date" class="input w-[170px]" />
+              <input id="dashboardDateTo" type="date" class="input w-[170px]" />
+              <button onclick="loadDashboard()" class="px-4 py-2 bg-gray-800 text-white rounded-lg hover:bg-black">刷新</button>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-6 gap-4 mb-6">
+            <div class="card"><p class="label">总用户数</p><p id="totalUsers" class="metric">-</p></div>
+            <div class="card"><p class="label">活跃商品</p><p id="activeItems" class="metric">-</p></div>
+            <div class="card"><p class="label">总订单数</p><p id="totalOrders" class="metric">-</p></div>
+            <div class="card"><p class="label">总交易额</p><p id="totalRevenue" class="metric">-</p></div>
+            <div class="card"><p class="label">待处理举报</p><p id="pendingReports" class="metric">-</p></div>
+            <div class="card"><p class="label">待处理反馈</p><p id="pendingFeedbacks" class="metric">-</p></div>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-6 gap-4 mb-6">
+            <div class="card"><p class="label">今日新增用户</p><p id="todayUsers" class="metric-sm">-</p></div>
+            <div class="card"><p class="label">今日新增订单</p><p id="todayOrders" class="metric-sm">-</p></div>
+            <div class="card"><p class="label">待处理取消订单</p><p id="pendingDisputeOrders" class="metric-sm">-</p></div>
+            <div class="card"><p class="label">今日新增商品</p><p id="todayItems" class="metric-sm">-</p></div>
+            <div class="card"><p class="label">今日成交额</p><p id="todayDealAmount" class="metric-sm">-</p></div>
+            <div class="card"><p class="label">今日完成交易</p><p id="todayCompletedTrades" class="metric-sm">-</p></div>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-6 gap-4 mb-6">
+            <div class="card"><p class="label">待处理纠纷</p><p id="pendingDisputes" class="metric-sm">-</p></div>
+            <div class="card"><p class="label">待审核商品</p><p id="pendingReviewItems" class="metric-sm">-</p></div>
+            <div class="card"><p class="label">置顶中商品</p><p id="pinnedItems" class="metric-sm">-</p></div>
+            <div class="card"><p class="label">置顶收入</p><p id="pinRevenue" class="metric-sm">-</p></div>
+            <div class="card"><p class="label">会员收入</p><p id="membershipRevenue" class="metric-sm">-</p></div>
+            <div class="card"><p class="label">线下服务待处理</p><p id="offlineServicePendingCount" class="metric-sm">-</p></div>
+          </div>
+
+          <div class="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            <div class="card">
+              <p class="font-semibold mb-3">待处理事项</p>
+              <div id="dashboardTodos" class="space-y-2 text-sm text-gray-700">
+                <p class="text-gray-500">暂无待办</p>
+              </div>
+            </div>
+            <div class="card">
+              <p class="font-semibold mb-3">图表占位（后续可接入图表库）</p>
+              <div id="dashboardCharts" class="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm text-gray-600">
+                <div class="rounded border border-dashed border-gray-300 p-3">用户增长趋势</div>
+                <div class="rounded border border-dashed border-gray-300 p-3">商品发布趋势</div>
+                <div class="rounded border border-dashed border-gray-300 p-3">订单增长趋势</div>
+                <div class="rounded border border-dashed border-gray-300 p-3">交易额趋势</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="usersSection" class="section hidden">
+          <div class="section-header">
+            <h2 class="title">用户管理</h2>
+            <div class="flex gap-2">
+              <button onclick="loadUsers(1)" class="btn-gray">刷新</button>
+              <button onclick="downloadExport('users')" class="btn-dark">导出 CSV</button>
+            </div>
+          </div>
+
+          <div class="card p-4 mb-4 grid grid-cols-1 xl:grid-cols-12 gap-3">
+            <input id="userSearch" type="text" class="input xl:col-span-3" placeholder="昵称/邮箱/手机号/用户ID" />
+            <select id="userBannedFilter" class="input">
+              <option value="">账号状态</option>
+              <option value="false">normal</option>
+              <option value="true">banned</option>
+            </select>
+            <select id="userRoleFilter" class="input">
+              <option value="">角色</option>
+              <option value="user">user</option>
+              <option value="admin">admin</option>
+            </select>
+            <select id="userMemberFilter" class="input">
+              <option value="">会员状态</option>
+              <option value="true">会员</option>
+              <option value="false">非会员</option>
+            </select>
+            <select id="userHasReportFilter" class="input">
+              <option value="">举报记录</option>
+              <option value="true">有</option>
+              <option value="false">无</option>
+            </select>
+            <select id="userHasTradeFilter" class="input">
+              <option value="">交易记录</option>
+              <option value="true">有</option>
+              <option value="false">无</option>
+            </select>
+            <input id="userDateFrom" type="date" class="input" />
+            <input id="userDateTo" type="date" class="input" />
+            <select id="userSortBy" class="input">
+              <option value="createdAt">注册时间</option>
+              <option value="updatedAt">最近活跃</option>
+              <option value="points">积分</option>
+              <option value="balance">余额</option>
+            </select>
+            <select id="userSortOrder" class="input">
+              <option value="desc">降序</option>
+              <option value="asc">升序</option>
+            </select>
+            <button onclick="loadUsers(1)" class="btn-red">筛选</button>
+          </div>
+
+          <div class="card overflow-x-auto">
+            <table class="min-w-full text-sm">
+              <thead class="bg-gray-50 text-gray-500 uppercase text-xs">
+                <tr>
+                  <th class="th">
+                    <input id="selectAllUsers" type="checkbox" onchange="toggleSelectAllUsers(this.checked)" />
+                  </th>
+                  <th class="th">ID</th>
+                  <th class="th">头像</th>
+                  <th class="th">昵称</th>
+                  <th class="th">邮箱</th>
+                  <th class="th">角色</th>
+                  <th class="th">商品数</th>
+                  <th class="th">成交</th>
+                  <th class="th">被举报</th>
+                  <th class="th">会员</th>
+                  <th class="th">注册时间</th>
+                  <th class="th">状态</th>
+                  <th class="th">操作</th>
+                </tr>
+              </thead>
+              <tbody id="usersList" class="divide-y">
+                <tr><td colspan="13" class="td text-center text-gray-500">加载中...</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="pagination-wrap">
+            <div class="text-sm text-gray-600">共 <span id="usersTotalCount">0</span> 条 · 已选 <span id="userSelectedCount">0</span></div>
+            <div id="usersPagination" class="pagination"></div>
+          </div>
+        </section>
+
+        <section id="reportsSection" class="section hidden">
+          <div class="section-header">
+            <h2 class="title">举报处理</h2>
+            <div class="flex gap-2">
+              <button onclick="batchResolveReports('DELETE_CONTENT')" class="btn-gray">批量删内容</button>
+              <button onclick="batchResolveReports('BAN_USER')" class="btn-gray">批量封禁</button>
+              <button onclick="batchResolveReports('REJECT')" class="btn-gray">批量驳回</button>
+              <button onclick="loadReports(1)" class="btn-gray">刷新</button>
+              <button onclick="downloadExport('reports')" class="btn-dark">导出 CSV</button>
+            </div>
+          </div>
+
+          <div class="card p-4 mb-4 grid grid-cols-1 xl:grid-cols-8 gap-3">
+            <select id="reportStatus" class="input">
+              <option value="">全部状态</option>
+              <option value="PENDING">PENDING</option>
+              <option value="HANDLED">HANDLED</option>
+              <option value="REJECTED">REJECTED</option>
+            </select>
+            <select id="reportTargetType" class="input">
+              <option value="">全部对象类型</option>
+              <option value="ITEM">ITEM</option>
+              <option value="USER">USER</option>
+              <option value="ORDER">ORDER</option>
+              <option value="TRADE">TRADE</option>
+            </select>
+            <input id="reportSearch" type="text" class="input" placeholder="举报理由/描述关键词" />
+            <input id="reportDateFrom" type="date" class="input" />
+            <input id="reportDateTo" type="date" class="input" />
+            <select id="reportSortBy" class="input">
+              <option value="createdAt">创建时间</option>
+              <option value="updatedAt">更新时间</option>
+              <option value="id">ID</option>
+            </select>
+            <select id="reportSortOrder" class="input">
+              <option value="desc">降序</option>
+              <option value="asc">升序</option>
+            </select>
+            <button onclick="loadReports(1)" class="btn-red">筛选</button>
+          </div>
+
+          <div class="mb-3 flex items-center gap-2 text-sm">
+            <input id="selectAllReports" type="checkbox" onchange="toggleSelectAllReports(this.checked)" />
+            <label for="selectAllReports" class="text-gray-700">全选当前页</label>
+            <span class="text-gray-500">已选 <span id="reportSelectedCount">0</span> 条</span>
+          </div>
+
+          <div id="reportsList" class="space-y-3"></div>
+
+          <div class="pagination-wrap">
+            <div class="text-sm text-gray-600">共 <span id="reportsTotalCount">0</span> 条</div>
+            <div id="reportsPagination" class="pagination"></div>
+          </div>
+        </section>
+
+        <section id="feedbacksSection" class="section hidden">
+          <div class="section-header">
+            <h2 class="title">反馈管理</h2>
+            <div class="flex gap-2">
+              <button onclick="loadFeedbacks(1)" class="btn-gray">刷新</button>
+              <button onclick="downloadExport('feedbacks')" class="btn-dark">导出 CSV</button>
+            </div>
+          </div>
+
+          <div class="card p-4 mb-4 grid grid-cols-1 xl:grid-cols-9 gap-3">
+            <select id="feedbackType" class="input">
+              <option value="">全部类型</option>
+              <option value="BUG">报告Bug</option>
+              <option value="FEATURE">功能建议</option>
+              <option value="REPORT">商品/用户举报</option>
+              <option value="PAYMENT_PIN">支付/置顶问题</option>
+              <option value="ACCOUNT">登录/账号问题</option>
+              <option value="OTHER">其他问题</option>
+            </select>
+            <select id="feedbackStatus" class="input">
+              <option value="">全部状态</option>
+              <option value="pending">pending</option>
+              <option value="in_progress">in_progress</option>
+              <option value="need_more_info">need_more_info</option>
+              <option value="confirmed">confirmed</option>
+              <option value="duplicate">duplicate</option>
+              <option value="invalid">invalid</option>
+              <option value="fixed">fixed</option>
+              <option value="accepted">accepted</option>
+              <option value="closed">closed</option>
+            </select>
+            <select id="feedbackPriority" class="input">
+              <option value="">全部优先级</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+              <option value="critical">critical</option>
+            </select>
+            <select id="feedbackRewardStatus" class="input">
+              <option value="">全部奖励状态</option>
+              <option value="none">none</option>
+              <option value="granted">granted</option>
+              <option value="not_granted">not_granted</option>
+            </select>
+            <select id="feedbackHasScreenshots" class="input">
+              <option value="">截图任意</option>
+              <option value="true">有截图</option>
+              <option value="false">无截图</option>
+            </select>
+            <input id="feedbackDateFrom" type="date" class="input" />
+            <input id="feedbackDateTo" type="date" class="input" />
+            <input id="feedbackSearch" type="text" placeholder="标题/描述/用户" class="input" />
+            <button onclick="loadFeedbacks(1)" class="btn-red">筛选</button>
+          </div>
+
+          <div id="feedbackList" class="space-y-3"></div>
+
+          <div class="pagination-wrap">
+            <div class="text-sm text-gray-600">共 <span id="feedbackTotalCount">0</span> 条</div>
+            <div id="feedbackPagination" class="pagination"></div>
+          </div>
+        </section>
+
+        <section id="itemsSection" class="section hidden">
+          <div class="section-header">
+            <h2 class="title">商品管理</h2>
+            <div class="flex gap-2">
+              <button onclick="batchUpdateItemsStatus('WITHDRAWN')" class="btn-gray">批量下架</button>
+              <button onclick="batchUpdateItemsStatus('ACTIVE')" class="btn-gray">批量上架</button>
+              <button onclick="loadItems(1)" class="btn-gray">刷新</button>
+              <button onclick="downloadExport('items')" class="btn-dark">导出 CSV</button>
+            </div>
+          </div>
+
+          <div class="card p-4 mb-4 grid grid-cols-1 xl:grid-cols-12 gap-3">
+            <input id="itemSearch" type="text" class="input xl:col-span-2" placeholder="标题/商品ID" />
+            <input id="itemSeller" type="text" class="input xl:col-span-2" placeholder="卖家昵称/邮箱/ID" />
+            <input id="itemCategory" type="text" class="input" placeholder="分类" />
+            <input id="itemCity" type="text" class="input" placeholder="城市" />
+            <select id="itemStatus" class="input">
+              <option value="">在售默认</option>
+              <option value="ALL">全部状态</option>
+              <option value="ACTIVE">ACTIVE</option>
+              <option value="RESERVED">RESERVED</option>
+              <option value="SOLD">SOLD</option>
+              <option value="PAUSED">PAUSED</option>
+              <option value="WITHDRAWN">WITHDRAWN</option>
+              <option value="PENDING_REVIEW">PENDING_REVIEW</option>
+              <option value="REJECTED">REJECTED</option>
+              <option value="REMOVED_BY_ADMIN">REMOVED_BY_ADMIN</option>
+            </select>
+            <select id="itemPinned" class="input">
+              <option value="">置顶任意</option>
+              <option value="true">置顶中</option>
+              <option value="false">未置顶</option>
+            </select>
+            <select id="itemUrgent" class="input">
+              <option value="">急售任意</option>
+              <option value="true">急售</option>
+              <option value="false">非急售</option>
+            </select>
+            <select id="itemHasReports" class="input">
+              <option value="">举报任意</option>
+              <option value="true">有举报</option>
+              <option value="false">无举报</option>
+            </select>
+            <input id="itemMinPrice" type="number" step="0.01" class="input" placeholder="最低价" />
+            <input id="itemMaxPrice" type="number" step="0.01" class="input" placeholder="最高价" />
+            <div class="xl:col-span-2 grid grid-cols-2 gap-2">
+              <input id="itemDateFrom" type="date" class="input" />
+              <input id="itemDateTo" type="date" class="input" />
+            </div>
+            <button onclick="loadItems(1)" class="btn-red">筛选</button>
+          </div>
+
+          <div class="mb-3 flex items-center gap-2 text-sm">
+            <input id="selectAllItems" type="checkbox" onchange="toggleSelectAllItems(this.checked)" />
+            <label for="selectAllItems" class="text-gray-700">全选当前页</label>
+            <span class="text-gray-500">已选 <span id="itemSelectedCount">0</span> 条</span>
+          </div>
+
+          <div id="itemsList" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4"></div>
+
+          <div class="pagination-wrap">
+            <div class="text-sm text-gray-600">共 <span id="itemsTotalCount">0</span> 条</div>
+            <div id="itemsPagination" class="pagination"></div>
+          </div>
+        </section>
+
+        <section id="ordersSection" class="section hidden">
+          <div class="section-header">
+            <h2 class="title">订单管理</h2>
+            <div class="flex gap-2">
+              <button onclick="loadOrders(1)" class="btn-gray">刷新</button>
+              <button onclick="downloadExport('orders')" class="btn-dark">导出 CSV</button>
+            </div>
+          </div>
+
+          <div class="card p-4 mb-4 grid grid-cols-1 xl:grid-cols-12 gap-3">
+            <input id="orderSearch" type="text" class="input xl:col-span-2" placeholder="订单ID/关键词" />
+            <input id="orderItemKeyword" type="text" class="input xl:col-span-2" placeholder="商品标题" />
+            <input id="orderBuyer" type="text" class="input xl:col-span-2" placeholder="买家昵称/邮箱/ID" />
+            <input id="orderSeller" type="text" class="input xl:col-span-2" placeholder="卖家昵称/邮箱/ID" />
+            <select id="orderStatus" class="input">
+              <option value="">全部状态</option>
+              <option value="PENDING">PENDING</option>
+              <option value="CONFIRMED">CONFIRMED</option>
+              <option value="PAID">PAID</option>
+              <option value="SHIPPED">SHIPPED</option>
+              <option value="COMPLETED">COMPLETED</option>
+              <option value="CANCELED">CANCELED</option>
+              <option value="DISPUTED">DISPUTED</option>
+              <option value="FAILED">FAILED</option>
+            </select>
+            <select id="orderHasDispute" class="input">
+              <option value="">纠纷任意</option>
+              <option value="true">有纠纷</option>
+              <option value="false">无纠纷</option>
+            </select>
+            <input id="orderMinAmount" type="number" step="0.01" class="input" placeholder="最低金额" />
+            <input id="orderMaxAmount" type="number" step="0.01" class="input" placeholder="最高金额" />
+            <input id="orderDateFrom" type="date" class="input" />
+            <input id="orderDateTo" type="date" class="input" />
+            <button onclick="loadOrders(1)" class="btn-red">筛选</button>
+          </div>
+
+          <div id="ordersList" class="space-y-3"></div>
+
+          <div class="pagination-wrap">
+            <div class="text-sm text-gray-600">共 <span id="ordersTotalCount">0</span> 条</div>
+            <div id="ordersPagination" class="pagination"></div>
+          </div>
+        </section>
+
+        <section id="transactionsSection" class="section hidden">
+          <div class="section-header">
+            <h2 class="title">交易管理</h2>
+            <button onclick="downloadExport('transactions')" class="btn-dark">导出 CSV</button>
+          </div>
+
+          <div class="card p-4 mb-4 grid grid-cols-1 xl:grid-cols-8 gap-3">
+            <select id="transactionType" class="input">
+              <option value="">全部类型</option>
+              <option value="PAYMENT">PAYMENT</option>
+              <option value="REFUND">REFUND</option>
+              <option value="FEE">FEE</option>
+              <option value="DEPOSIT">DEPOSIT</option>
+            </select>
+            <select id="transactionSource" class="input">
+              <option value="">全部来源</option>
+              <option value="TRADE">买卖交易</option>
+              <option value="SERVICE">平台配送</option>
+              <option value="MEMBERSHIP">会员</option>
+              <option value="FEATURE">虚拟功能</option>
+              <option value="RECHARGE">余额充值</option>
+              <option value="ADMIN">管理端发放</option>
+              <option value="SYSTEM">系统事件</option>
+              <option value="OTHER">其他</option>
+            </select>
+            <input id="transactionDateFrom" type="date" class="input" />
+            <input id="transactionDateTo" type="date" class="input" />
+            <input id="transactionMinAmount" type="number" step="0.01" placeholder="最小金额" class="input" />
+            <input id="transactionMaxAmount" type="number" step="0.01" placeholder="最大金额" class="input" />
+            <div></div>
+            <button onclick="loadTransactions(1)" class="btn-red">筛选</button>
+          </div>
+
+          <div class="card overflow-x-auto">
+            <table class="min-w-full text-sm">
+              <thead class="bg-gray-50 text-gray-500 uppercase text-xs">
+                <tr>
+                  <th class="th">流水ID</th>
+                  <th class="th">来源</th>
+                  <th class="th">类型</th>
+                  <th class="th">金额</th>
+                  <th class="th">用户</th>
+                  <th class="th">订单</th>
+                  <th class="th">说明</th>
+                  <th class="th">时间</th>
+                </tr>
+              </thead>
+              <tbody id="transactionsList" class="divide-y">
+                <tr><td colspan="8" class="td text-center text-gray-500">加载中...</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="pagination-wrap">
+            <div class="text-sm text-gray-600">共 <span id="transactionsTotalCount">0</span> 条</div>
+            <div id="transactionsPagination" class="pagination"></div>
+          </div>
+        </section>
+
+        <section id="disputesSection" class="section hidden">
+          <div class="section-header">
+            <h2 class="title">纠纷处理</h2>
+            <button onclick="loadDisputes(1)" class="btn-dark">刷新</button>
+          </div>
+
+          <div class="card p-4 mb-4 grid grid-cols-1 xl:grid-cols-5 gap-3">
+            <select id="disputeReportStatus" class="input">
+              <option value="">全部举报状态</option>
+              <option value="PENDING" selected>PENDING</option>
+              <option value="HANDLED">HANDLED</option>
+              <option value="REJECTED">REJECTED</option>
+            </select>
+            <input id="disputeDateFrom" type="date" class="input" />
+            <input id="disputeDateTo" type="date" class="input" />
+            <div></div>
+            <button onclick="loadDisputes(1)" class="btn-red">筛选</button>
+          </div>
+
+          <div class="mb-8">
+            <h3 class="text-xl font-bold mb-3">举报纠纷</h3>
+            <div id="disputesReportsList" class="space-y-3"></div>
+          </div>
+
+          <div class="mb-8">
+            <h3 class="text-xl font-bold mb-3">取消订单纠纷</h3>
+            <div id="disputesOrdersList" class="space-y-3"></div>
+          </div>
+
+          <div>
+            <h3 class="text-xl font-bold mb-3">退款流水</h3>
+            <div id="disputesRefundsList" class="space-y-3"></div>
+          </div>
+
+          <div class="pagination-wrap">
+            <div class="text-sm text-gray-600">举报总数 <span id="disputesTotalCount">0</span></div>
+            <div id="disputesPagination" class="pagination"></div>
+          </div>
+        </section>
+
+        <section id="offlineSection" class="section hidden">
+          <div class="section-header">
+            <h2 class="title">线下服务管理</h2>
+            <button onclick="loadOfflineSection()" class="btn-dark">刷新</button>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 mb-6">
+            <div class="card"><p class="label">配送/搬运单</p><p id="offlineMovingCount" class="metric-sm">-</p></div>
+            <div class="card"><p class="label">仓储订单</p><p id="offlineStorageCount" class="metric-sm">-</p></div>
+            <div class="card"><p class="label">回收商品</p><p id="offlineRecycleCount" class="metric-sm">-</p></div>
+            <div class="card"><p class="label">寄卖授权</p><p id="offlineConsignmentCount" class="metric-sm">-</p></div>
+          </div>
+
+          <div class="mb-8">
+            <div class="flex justify-between items-center mb-3">
+              <h3 class="text-xl font-bold">配送/搬运</h3>
+              <div class="flex gap-2">
+                <button onclick="batchUpdateMovingStatus('CONFIRMED')" class="btn-gray">批量确认</button>
+                <button onclick="batchUpdateMovingStatus('IN_PROGRESS')" class="btn-gray">批量进行中</button>
+                <button onclick="batchUpdateMovingStatus('COMPLETED')" class="btn-gray">批量完成</button>
+              </div>
+            </div>
+
+            <div class="card p-4 mb-3 grid grid-cols-1 xl:grid-cols-8 gap-3">
+              <input id="movingKeyword" type="text" placeholder="地址/联系人/备注" class="input xl:col-span-2" />
+              <select id="movingStatus" class="input">
+                <option value="">全部状态</option>
+                <option value="PENDING">PENDING</option>
+                <option value="CONFIRMED">CONFIRMED</option>
+                <option value="IN_PROGRESS">IN_PROGRESS</option>
+                <option value="COMPLETED">COMPLETED</option>
+                <option value="CANCELED">CANCELED</option>
+              </select>
+              <select id="movingSortBy" class="input" onchange="loadMovingServices(1)">
+                <option value="appointment_asc">按预约时间（最近优先）</option>
+                <option value="appointment_desc">按预约时间（最晚优先）</option>
+                <option value="created_desc">按创建时间（最新）</option>
+                <option value="created_asc">按创建时间（最早）</option>
+              </select>
+              <input id="movingDateFrom" type="date" class="input" />
+              <input id="movingDateTo" type="date" class="input" />
+              <input id="movingScheduleDate" type="date" class="input" title="筛选指定预约日期" />
+              <button onclick="loadMovingServices(1)" class="btn-red">筛选</button>
+            </div>
+            <div class="mb-3 flex flex-wrap items-center justify-between gap-3 text-sm">
+              <label class="inline-flex items-center gap-2 text-gray-600">
+                <input id="movingGroupByScheduleDate" type="checkbox" checked onchange="loadMovingServices(1)" />
+                按预约日期分组显示
+              </label>
+              <div class="flex gap-2">
+                <button onclick="setMovingScheduleDateToday()" class="btn-gray">今日预约</button>
+                <button onclick="clearMovingScheduleDateFilter()" class="btn-gray">清空预约筛选</button>
+              </div>
+            </div>
+
+            <div id="movingWorkflowPanel" class="card p-4 mb-3 border border-red-100">
+              <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
+                <div>
+                  <h4 class="text-lg font-semibold">配送流程工作台</h4>
+                  <p class="text-xs text-gray-500">页内完成分配配送员、报价、取货、送达等流程，不再使用弹窗。</p>
+                </div>
+                <button onclick="resetMovingWorkflowPanel()" class="btn-gray">清空选择</button>
+              </div>
+
+              <div id="movingWorkflowMessage" class="hidden"></div>
+
+              <div class="bg-gray-50 rounded-lg border p-3 mb-3">
+                <div class="flex flex-wrap items-center gap-4 text-sm mb-2">
+                  <span>当前服务ID：<strong id="movingWorkflowServiceId">-</strong></span>
+                  <span>当前状态：<strong id="movingWorkflowCurrentStatus">-</strong></span>
+                </div>
+                <div id="movingWorkflowSummary"></div>
+              </div>
+
+              <div class="mb-3">
+                <p class="text-xs text-gray-500 mb-2">流程步骤</p>
+                <div id="movingWorkflowTimeline" class="flex flex-wrap gap-2"></div>
+              </div>
+
+              <div class="grid grid-cols-1 xl:grid-cols-2 gap-3">
+                <div>
+                  <label class="text-xs text-gray-600 block mb-1">下一步动作</label>
+                  <select id="movingWorkflowTargetStatus" class="input" onchange="handleMovingWorkflowStatusChange()">
+                    <option value="">请选择服务后可操作</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="text-xs text-gray-600 block mb-1">处理备注（可选）</label>
+                  <input id="movingWorkflowReason" type="text" class="input" placeholder="例如：已与买家电话确认" />
+                </div>
+
+                <div id="movingWorkflowMoverNameRow" class="hidden">
+                  <label class="text-xs text-gray-600 block mb-1">配送员/服务商名称</label>
+                  <input id="movingWorkflowMoverName" type="text" class="input" placeholder="可选" />
+                </div>
+                <div id="movingWorkflowMoverPhoneRow" class="hidden">
+                  <label class="text-xs text-gray-600 block mb-1">配送员联系电话</label>
+                  <input id="movingWorkflowMoverPhone" type="text" class="input" placeholder="可选" />
+                </div>
+
+                <div id="movingWorkflowQuoteRow" class="hidden">
+                  <label class="text-xs text-gray-600 block mb-1">配送报价（AUD）</label>
+                  <input id="movingWorkflowQuote" type="number" step="0.01" min="0" class="input" placeholder="例如 18.50" />
+                </div>
+                <div id="movingWorkflowMovingDateRow" class="hidden">
+                  <label class="text-xs text-gray-600 block mb-1">取货日期</label>
+                  <input id="movingWorkflowMovingDate" type="date" class="input" />
+                </div>
+
+                <div id="movingWorkflowMovingTimeRow" class="hidden">
+                  <label class="text-xs text-gray-600 block mb-1">取货时间段</label>
+                  <input id="movingWorkflowMovingTime" type="text" class="input" placeholder="例如 18:00-19:00" />
+                </div>
+                <div id="movingWorkflowEstimatedPickupAtRow" class="hidden">
+                  <label class="text-xs text-gray-600 block mb-1">预计取货时间</label>
+                  <input id="movingWorkflowEstimatedPickupAt" type="hidden" />
+                  <div class="time-wheel-panel">
+                    <input
+                      id="movingWorkflowEstimatedPickupAtDate"
+                      type="date"
+                      class="input"
+                      onchange="syncTimeWheelFromDate('movingWorkflowEstimatedPickupAt')"
+                    />
+                    <div class="time-wheel-preview">
+                      <span id="movingWorkflowEstimatedPickupAtPreview">未选择</span>
+                      <button type="button" class="time-wheel-clear" onclick="clearTimeWheel('movingWorkflowEstimatedPickupAt')">清空</button>
+                    </div>
+                    <div class="time-wheel-grid">
+                      <div>
+                        <p class="time-wheel-label">小时</p>
+                        <div id="movingWorkflowEstimatedPickupAtHourWheel" class="time-wheel-list" tabindex="0" aria-label="预计取货小时"></div>
+                      </div>
+                      <div>
+                        <p class="time-wheel-label">分钟</p>
+                        <div id="movingWorkflowEstimatedPickupAtMinuteWheel" class="time-wheel-list" tabindex="0" aria-label="预计取货分钟"></div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div id="movingWorkflowEstimatedDeliveryAtRow" class="hidden">
+                  <label class="text-xs text-gray-600 block mb-1">预计送达时间</label>
+                  <input id="movingWorkflowEstimatedDeliveryAt" type="hidden" />
+                  <div class="time-wheel-panel">
+                    <input
+                      id="movingWorkflowEstimatedDeliveryAtDate"
+                      type="date"
+                      class="input"
+                      onchange="syncTimeWheelFromDate('movingWorkflowEstimatedDeliveryAt')"
+                    />
+                    <div class="time-wheel-preview">
+                      <span id="movingWorkflowEstimatedDeliveryAtPreview">未选择</span>
+                      <button type="button" class="time-wheel-clear" onclick="clearTimeWheel('movingWorkflowEstimatedDeliveryAt')">清空</button>
+                    </div>
+                    <div class="time-wheel-grid">
+                      <div>
+                        <p class="time-wheel-label">小时</p>
+                        <div id="movingWorkflowEstimatedDeliveryAtHourWheel" class="time-wheel-list" tabindex="0" aria-label="预计送达小时"></div>
+                      </div>
+                      <div>
+                        <p class="time-wheel-label">分钟</p>
+                        <div id="movingWorkflowEstimatedDeliveryAtMinuteWheel" class="time-wheel-list" tabindex="0" aria-label="预计送达分钟"></div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div id="movingWorkflowPickupPhotosRow" class="hidden xl:col-span-2">
+                  <label class="text-xs text-gray-600 block mb-1">取货照片（可多张，填写图片 URL，逗号或换行分隔）</label>
+                  <textarea id="movingWorkflowPickupPhotos" rows="2" class="input" placeholder="https://..."></textarea>
+                </div>
+
+                <div id="movingWorkflowDeliveryPhotosRow" class="hidden xl:col-span-2">
+                  <label class="text-xs text-gray-600 block mb-1">送达照片 URL（多条用逗号或换行）</label>
+                  <textarea id="movingWorkflowDeliveryPhotos" rows="2" class="input" placeholder="https://..."></textarea>
+                </div>
+              </div>
+
+              <div class="flex flex-wrap items-center justify-between gap-3 mt-3">
+                <p id="movingWorkflowHint" class="text-xs text-gray-500">请选择服务和动作后提交。</p>
+                <button id="movingWorkflowSubmitBtn" onclick="submitMovingWorkflow()" class="btn-red" disabled>提交流程更新</button>
+              </div>
+            </div>
+
+            <div class="mb-2 flex items-center gap-2 text-sm">
+              <input id="selectAllMoving" type="checkbox" onchange="toggleSelectAllMoving(this.checked)" />
+              <label for="selectAllMoving">全选当前页</label>
+              <span class="text-gray-500">已选 <span id="movingSelectedCount">0</span> 条</span>
+            </div>
+
+            <div id="movingServicesList" class="space-y-3"></div>
+            <div class="pagination-wrap">
+              <div class="text-sm text-gray-600">共 <span id="movingTotalCount">0</span> 条</div>
+              <div id="movingPagination" class="pagination"></div>
+            </div>
+          </div>
+
+          <div class="mb-8">
+            <div class="flex justify-between items-center mb-3">
+              <h3 class="text-xl font-bold">仓储订单</h3>
+              <div class="flex gap-2">
+                <button onclick="batchUpdateStorageStatus('ACTIVE')" class="btn-gray">批量激活</button>
+                <button onclick="batchUpdateStorageStatus('COMPLETED')" class="btn-gray">批量完成</button>
+                <button onclick="batchUpdateStorageStatus('EXPIRED')" class="btn-gray">批量过期</button>
+              </div>
+            </div>
+
+            <div class="card p-4 mb-3 grid grid-cols-1 xl:grid-cols-5 gap-3">
+              <select id="storageStatus" class="input">
+                <option value="">全部状态</option>
+                <option value="PENDING">PENDING</option>
+                <option value="ACTIVE">ACTIVE</option>
+                <option value="EXPIRED">EXPIRED</option>
+                <option value="COMPLETED">COMPLETED</option>
+              </select>
+              <input id="storageDateFrom" type="date" class="input" />
+              <input id="storageDateTo" type="date" class="input" />
+              <div></div>
+              <button onclick="loadStorageOrders(1)" class="btn-red">筛选</button>
+            </div>
+
+            <div class="mb-2 flex items-center gap-2 text-sm">
+              <input id="selectAllStorage" type="checkbox" onchange="toggleSelectAllStorage(this.checked)" />
+              <label for="selectAllStorage">全选当前页</label>
+              <span class="text-gray-500">已选 <span id="storageSelectedCount">0</span> 条</span>
+            </div>
+
+            <div id="storageOrdersList" class="space-y-3"></div>
+            <div class="pagination-wrap">
+              <div class="text-sm text-gray-600">共 <span id="storageTotalCount">0</span> 条</div>
+              <div id="storagePagination" class="pagination"></div>
+            </div>
+          </div>
+
+          <div>
+            <h3 class="text-xl font-bold mb-3">回收/寄卖</h3>
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+              <div>
+                <h4 class="font-semibold mb-2">回收候选商品</h4>
+                <div id="recycleItemsList" class="space-y-3"></div>
+              </div>
+              <div>
+                <h4 class="font-semibold mb-2">寄卖授权订单</h4>
+                <div id="consignmentOrdersList" class="space-y-3"></div>
+              </div>
+              <div>
+                <h4 class="font-semibold mb-2">寄卖商品</h4>
+                <div id="consignedItemsList" class="space-y-3"></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="logsSection" class="section hidden">
+          <div class="section-header">
+            <h2 class="title">管理员操作日志</h2>
+            <button onclick="downloadExport('logs')" class="btn-dark">导出 CSV</button>
+          </div>
+
+          <div class="card p-4 mb-4 grid grid-cols-1 xl:grid-cols-6 gap-3">
+            <input id="logAction" type="text" placeholder="动作（如 BAN_USER）" class="input" />
+            <input id="logTargetType" type="text" placeholder="目标类型（User/Item/Order）" class="input" />
+            <input id="logAdminId" type="number" placeholder="管理员ID" class="input" />
+            <input id="logDateFrom" type="date" class="input" />
+            <input id="logDateTo" type="date" class="input" />
+            <input id="logKeyword" type="text" placeholder="关键词（动作/类型/IP/ID）" class="input" />
+            <button onclick="loadLogs(1)" class="btn-red">筛选</button>
+          </div>
+
+          <div class="card overflow-x-auto">
+            <table class="min-w-full text-sm">
+              <thead class="bg-gray-50 text-gray-500 uppercase text-xs">
+                <tr>
+                  <th class="th">时间</th>
+                  <th class="th">管理员</th>
+                  <th class="th">动作</th>
+                  <th class="th">目标</th>
+                  <th class="th">详情</th>
+                </tr>
+              </thead>
+              <tbody id="logsList" class="divide-y">
+                <tr><td colspan="5" class="td text-center text-gray-500">加载中...</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="pagination-wrap">
+            <div class="text-sm text-gray-600">共 <span id="logsTotalCount">0</span> 条</div>
+            <div id="logsPagination" class="pagination"></div>
+          </div>
+        </section>
+
+        <section id="commercializationSection" class="section hidden">
+          <div class="section-header">
+            <h2 class="title">商业化管理</h2>
+            <button onclick="loadCommercializationSection()" class="btn-dark">刷新</button>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-6 gap-4 mb-6">
+            <div class="card"><p class="label">置顶中商品</p><p id="bizPinnedItems" class="metric-sm">-</p></div>
+            <div class="card"><p class="label">置顶收入</p><p id="bizPinRevenue" class="metric-sm">-</p></div>
+            <div class="card"><p class="label">会员收入</p><p id="bizMembershipRevenue" class="metric-sm">-</p></div>
+            <div class="card"><p class="label">活跃会员</p><p id="bizActiveMembers" class="metric-sm">-</p></div>
+            <div class="card"><p class="label">待处理支付</p><p id="bizPendingOrders" class="metric-sm">-</p></div>
+            <div class="card"><p class="label">奖励记录总数</p><p id="bizRewardsCount" class="metric-sm">-</p></div>
+          </div>
+
+          <div class="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            <div class="card">
+              <div class="flex justify-between items-center mb-3">
+                <h3 class="font-semibold">置顶订单</h3>
+                <button onclick="loadPinOrders(1)" class="btn-gray">刷新</button>
+              </div>
+              <div class="grid grid-cols-1 md:grid-cols-4 gap-2 mb-3">
+                <input id="pinOrderSearch" class="input md:col-span-2" placeholder="订单ID/商品ID/用户ID" />
+                <select id="pinOrderStatus" class="input">
+                  <option value="">全部状态</option>
+                  <option value="PENDING">PENDING</option>
+                  <option value="PAID">PAID</option>
+                  <option value="FAILED">FAILED</option>
+                  <option value="CANCELED">CANCELED</option>
+                </select>
+                <button onclick="loadPinOrders(1)" class="btn-red">筛选</button>
+              </div>
+              <div id="pinOrdersList" class="space-y-2 text-sm"></div>
+              <div class="pagination-wrap">
+                <div class="text-sm text-gray-600">共 <span id="pinOrdersTotalCount">0</span> 条</div>
+                <div id="pinOrdersPagination" class="pagination"></div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="flex justify-between items-center mb-3">
+                <h3 class="font-semibold">会员与奖励</h3>
+                <button onclick="loadMemberships(1); loadRewardRecords(1);" class="btn-gray">刷新</button>
+              </div>
+              <div class="grid grid-cols-1 md:grid-cols-4 gap-2 mb-3">
+                <input id="membershipSearch" class="input md:col-span-2" placeholder="用户ID/订单ID" />
+                <select id="membershipStatus" class="input">
+                  <option value="">全部状态</option>
+                  <option value="PAID">PAID</option>
+                  <option value="PENDING">PENDING</option>
+                </select>
+                <button onclick="loadMemberships(1)" class="btn-red">筛选</button>
+              </div>
+              <div id="membershipsList" class="space-y-2 text-sm mb-4"></div>
+              <div class="pagination-wrap">
+                <div class="text-sm text-gray-600">共 <span id="membershipsTotalCount">0</span> 条</div>
+                <div id="membershipsPagination" class="pagination"></div>
+              </div>
+              <div class="mt-4">
+                <button onclick="openGrantMembershipPrompt()" class="btn-gray mr-2">手动开通会员</button>
+                <button onclick="openGrantRewardPrompt()" class="btn-red">发放奖励</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="card mt-4">
+            <div class="flex justify-between items-center mb-3">
+              <h3 class="font-semibold">奖励记录</h3>
+              <button onclick="loadRewardRecords(1)" class="btn-gray">刷新</button>
+            </div>
+            <div id="rewardRecordsList" class="space-y-2 text-sm"></div>
+            <div class="pagination-wrap">
+              <div class="text-sm text-gray-600">共 <span id="rewardRecordsTotalCount">0</span> 条</div>
+              <div id="rewardRecordsPagination" class="pagination"></div>
+            </div>
+          </div>
+        </section>
+
+        <section id="configSection" class="section hidden">
+          <div class="section-header">
+            <h2 class="title">系统配置 / 功能开关</h2>
+            <button onclick="loadFeatureFlags()" class="btn-dark">刷新</button>
+          </div>
+          <div class="card p-4 space-y-4">
+            <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+              <label class="flex items-center justify-between p-3 border rounded">
+                <span>开启多商品发布</span>
+                <input id="flagBatchPublishEnabled" type="checkbox" />
+              </label>
+              <label class="flex items-center justify-between p-3 border rounded">
+                <span>开启付费置顶</span>
+                <input id="flagPaidPinEnabled" type="checkbox" />
+              </label>
+              <label class="flex items-center justify-between p-3 border rounded">
+                <span>开启会员购买</span>
+                <input id="flagMembershipPurchaseEnabled" type="checkbox" />
+              </label>
+              <label class="flex items-center justify-between p-3 border rounded">
+                <span>开启反馈奖励</span>
+                <input id="flagFeedbackRewardEnabled" type="checkbox" />
+              </label>
+              <label class="flex items-center justify-between p-3 border rounded">
+                <span>开启线下服务申请</span>
+                <input id="flagOfflineServiceEnabled" type="checkbox" />
+              </label>
+              <label class="flex items-center justify-between p-3 border rounded">
+                <span>开启商品审核</span>
+                <input id="flagItemReviewEnabled" type="checkbox" />
+              </label>
+              <label class="flex items-center justify-between p-3 border rounded">
+                <span>开启举报入口</span>
+                <input id="flagReportEnabled" type="checkbox" />
+              </label>
+              <label class="flex items-center justify-between p-3 border rounded">
+                <span>开启交易流程卡片</span>
+                <input id="flagTradeFlowCardEnabled" type="checkbox" />
+              </label>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-5 gap-3">
+              <input id="flagPin24hPrice" type="number" step="0.01" class="input" placeholder="置顶24h价格" />
+              <input id="flagPin3dPrice" type="number" step="0.01" class="input" placeholder="置顶3天价格" />
+              <input id="flagPin7dPrice" type="number" step="0.01" class="input" placeholder="置顶7天价格" />
+              <input id="flagFreeBatchQuota" type="number" class="input" placeholder="免费批量发布次数" />
+              <input id="flagFeedbackDailyLimit" type="number" class="input" placeholder="反馈每日上限" />
+            </div>
+
+            <div class="flex gap-2">
+              <button onclick="saveFeatureFlags()" class="btn-red">保存配置</button>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <div id="detailDrawerMask" class="hidden fixed inset-0 bg-black/20 z-40" onclick="closeDetailDrawer()"></div>
+  <aside id="detailDrawer" class="hidden fixed top-0 right-0 h-full w-full md:w-[520px] bg-white shadow-2xl z-50 overflow-y-auto">
+    <div class="sticky top-0 bg-white border-b px-4 py-3 flex justify-between items-center">
+      <h3 id="detailDrawerTitle" class="text-lg font-bold">详情</h3>
+      <button onclick="closeDetailDrawer()" class="text-gray-600 hover:text-black"><i class="fas fa-times text-xl"></i></button>
+    </div>
+    <div id="detailDrawerBody" class="p-4 space-y-3 text-sm"></div>
+  </aside>
+
+  <script src="app.js"></script>
+</body>
+</html>
+
+<style>
+  .menu-item {
+    display: block;
+    padding: 0.9rem 1.5rem;
+    color: #4b5563;
+    border-left: 4px solid transparent;
+    transition: all 0.2s;
+  }
+
+  .menu-item:hover {
+    background: #fef2f2;
+    color: #dc2626;
+  }
+
+  .menu-item.active {
+    background: #fee2e2;
+    color: #dc2626;
+    border-left-color: #dc2626;
+    font-weight: 600;
+  }
+
+  .section {
+    animation: fadeIn 0.2s ease;
+  }
+
+  .section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1rem;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+  }
+
+  .title {
+    font-size: 1.85rem;
+    font-weight: 700;
+  }
+
+  .card {
+    background: white;
+    border-radius: 0.75rem;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+    border: 1px solid #f3f4f6;
+    padding: 1rem;
+  }
+
+  .label {
+    color: #6b7280;
+    font-size: 0.875rem;
+  }
+
+  .metric {
+    font-size: 1.9rem;
+    font-weight: 700;
+    color: #111827;
+    margin-top: 0.25rem;
+  }
+
+  .metric-sm {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: #111827;
+    margin-top: 0.25rem;
+  }
+
+  .input {
+    width: 100%;
+    border: 1px solid #d1d5db;
+    border-radius: 0.5rem;
+    padding: 0.55rem 0.75rem;
+    font-size: 0.9rem;
+  }
+
+  .input:focus {
+    outline: none;
+    border-color: #ef4444;
+    box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.16);
+  }
+
+  .time-wheel-panel {
+    border: 1px solid #e5e7eb;
+    border-radius: 0.85rem;
+    padding: 0.8rem;
+    background: linear-gradient(180deg, #fffaf9 0%, #ffffff 100%);
+  }
+
+  .time-wheel-preview {
+    margin-top: 0.6rem;
+    margin-bottom: 0.75rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    font-size: 0.82rem;
+    color: #6b7280;
+  }
+
+  .time-wheel-clear {
+    border: none;
+    background: transparent;
+    color: #dc2626;
+    font-weight: 700;
+    cursor: pointer;
+  }
+
+  .time-wheel-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.75rem;
+  }
+
+  .time-wheel-label {
+    margin-bottom: 0.35rem;
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: #6b7280;
+  }
+
+  .time-wheel-list {
+    max-height: 12rem;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scroll-behavior: smooth;
+    scroll-snap-type: y proximity;
+    padding: 0.3rem;
+    border: 1px solid #e5e7eb;
+    border-radius: 0.8rem;
+    background:
+      linear-gradient(180deg, rgba(255,255,255,0.95) 0%, rgba(248,250,252,0.98) 100%);
+    box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.05);
+  }
+
+  .time-wheel-list:focus {
+    outline: none;
+    border-color: #f87171;
+    box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.15);
+  }
+
+  .time-wheel-option {
+    width: 100%;
+    border: none;
+    background: transparent;
+    padding: 0.56rem 0.35rem;
+    border-radius: 0.7rem;
+    color: #6b7280;
+    font-size: 0.9rem;
+    font-weight: 700;
+    cursor: pointer;
+    scroll-snap-align: center;
+    transition: all 0.16s ease;
+  }
+
+  .time-wheel-option:hover {
+    background: #fff1f2;
+    color: #be123c;
+  }
+
+  .time-wheel-option.active {
+    background: linear-gradient(135deg, #ef4444, #dc2626);
+    color: #ffffff;
+    box-shadow: 0 8px 18px rgba(220, 38, 38, 0.22);
+  }
+
+  @media (max-width: 768px) {
+    .time-wheel-grid {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  .btn-red,
+  .btn-dark,
+  .btn-gray {
+    border-radius: 0.56rem;
+    color: white;
+    font-size: 0.875rem;
+    font-weight: 700;
+    padding: 0.56rem 0.98rem;
+    white-space: nowrap;
+    border: 1px solid transparent;
+    transition: all 0.18s ease;
+  }
+
+  .btn-red {
+    background: linear-gradient(135deg, #e14d2a, #cf3f1f);
+    box-shadow: 0 6px 14px rgba(225, 77, 42, 0.26);
+  }
+
+  .btn-red:hover {
+    background: linear-gradient(135deg, #d54422, #bf381a);
+    box-shadow: 0 10px 18px rgba(225, 77, 42, 0.32);
+    transform: translateY(-1px);
+  }
+
+  .btn-dark {
+    background: linear-gradient(135deg, #1f2937, #111827);
+    box-shadow: 0 6px 14px rgba(17, 24, 39, 0.24);
+  }
+
+  .btn-dark:hover {
+    background: linear-gradient(135deg, #111827, #030712);
+    box-shadow: 0 10px 18px rgba(17, 24, 39, 0.3);
+    transform: translateY(-1px);
+  }
+
+  .btn-gray {
+    background: linear-gradient(135deg, #64748b, #4b5563);
+    box-shadow: 0 6px 14px rgba(75, 85, 99, 0.2);
+  }
+
+  .btn-gray:hover {
+    background: linear-gradient(135deg, #58657a, #404a58);
+    box-shadow: 0 10px 18px rgba(75, 85, 99, 0.28);
+    transform: translateY(-1px);
+  }
+
+  .btn-red:focus-visible,
+  .btn-dark:focus-visible,
+  .btn-gray:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.22);
+  }
+
+  .action-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 30px;
+    white-space: nowrap;
+    border-radius: 0.45rem;
+    border: 1px solid #d1d5db;
+    background: #ffffff;
+    padding: 0.18rem 0.56rem;
+    font-size: 0.84rem;
+    font-weight: 700;
+    line-height: 1;
+    transition: all 0.15s ease;
+  }
+
+  .action-btn:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 10px rgba(17, 24, 39, 0.12);
+  }
+
+  .action-btn-blue {
+    color: #2563eb;
+    border-color: #93c5fd;
+    background: #eff6ff;
+  }
+
+  .action-btn-red {
+    color: #dc2626;
+    border-color: #fca5a5;
+    background: #fff1f2;
+  }
+
+  .action-btn-green {
+    color: #15803d;
+    border-color: #86efac;
+    background: #f0fdf4;
+  }
+
+  .action-btn-amber {
+    color: #b45309;
+    border-color: #fcd34d;
+    background: #fffbeb;
+  }
+
+  .th {
+    text-align: left;
+    padding: 0.7rem 0.85rem;
+  }
+
+  .td {
+    padding: 0.8rem 0.85rem;
+    vertical-align: top;
+  }
+
+  .pagination-wrap {
+    margin-top: 1rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+  }
+
+  .pagination {
+    display: flex;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+  }
+
+  .page-btn {
+    border: 1px solid #d1d5db;
+    border-radius: 0.45rem;
+    padding: 0.28rem 0.65rem;
+    font-size: 0.84rem;
+    background: white;
+  }
+
+  .page-btn:hover {
+    background: #f9fafb;
+  }
+
+  .page-btn.active {
+    background: #dc2626;
+    border-color: #dc2626;
+    color: white;
+  }
+
+  @keyframes fadeIn {
+    from {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+</style>
