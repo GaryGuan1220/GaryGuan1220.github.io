@@ -125,6 +125,7 @@
           <div class="section-header">
             <h2 class="title">用户管理</h2>
             <div class="flex gap-2">
+              <button onclick="clearSectionFilters('users')" class="btn-gray">清空筛选</button>
               <button onclick="loadUsers(1)" class="btn-gray">刷新</button>
               <button onclick="downloadExport('users')" class="btn-dark">导出 CSV</button>
             </div>
@@ -209,6 +210,7 @@
           <div class="section-header">
             <h2 class="title">举报处理</h2>
             <div class="flex gap-2">
+              <button onclick="clearSectionFilters('reports')" class="btn-gray">清空筛选</button>
               <button onclick="batchResolveReports('DELETE_CONTENT')" class="btn-gray">批量删内容</button>
               <button onclick="batchResolveReports('BAN_USER')" class="btn-gray">批量封禁</button>
               <button onclick="batchResolveReports('REJECT')" class="btn-gray">批量驳回</button>
@@ -264,6 +266,7 @@
           <div class="section-header">
             <h2 class="title">反馈管理</h2>
             <div class="flex gap-2">
+              <button onclick="clearSectionFilters('feedbacks')" class="btn-gray">清空筛选</button>
               <button onclick="loadFeedbacks(1)" class="btn-gray">刷新</button>
               <button onclick="downloadExport('feedbacks')" class="btn-dark">导出 CSV</button>
             </div>
@@ -327,6 +330,7 @@
           <div class="section-header">
             <h2 class="title">商品管理</h2>
             <div class="flex gap-2">
+              <button onclick="clearSectionFilters('items')" class="btn-gray">清空筛选</button>
               <button onclick="batchUpdateItemsStatus('WITHDRAWN')" class="btn-gray">批量下架</button>
               <button onclick="batchUpdateItemsStatus('ACTIVE')" class="btn-gray">批量上架</button>
               <button onclick="loadItems(1)" class="btn-gray">刷新</button>
@@ -393,6 +397,7 @@
           <div class="section-header">
             <h2 class="title">订单管理</h2>
             <div class="flex gap-2">
+              <button onclick="clearSectionFilters('orders')" class="btn-gray">清空筛选</button>
               <button onclick="loadOrders(1)" class="btn-gray">刷新</button>
               <button onclick="downloadExport('orders')" class="btn-dark">导出 CSV</button>
             </div>
@@ -437,7 +442,10 @@
         <section id="transactionsSection" class="section hidden">
           <div class="section-header">
             <h2 class="title">交易管理</h2>
-            <button onclick="downloadExport('transactions')" class="btn-dark">导出 CSV</button>
+            <div class="flex gap-2">
+              <button onclick="clearSectionFilters('transactions')" class="btn-gray">清空筛选</button>
+              <button onclick="downloadExport('transactions')" class="btn-dark">导出 CSV</button>
+            </div>
           </div>
 
           <div class="card p-4 mb-4 grid grid-cols-1 xl:grid-cols-8 gap-3">
@@ -496,7 +504,10 @@
         <section id="disputesSection" class="section hidden">
           <div class="section-header">
             <h2 class="title">纠纷处理</h2>
-            <button onclick="loadDisputes(1)" class="btn-dark">刷新</button>
+            <div class="flex gap-2">
+              <button onclick="clearSectionFilters('disputes')" class="btn-gray">清空筛选</button>
+              <button onclick="loadDisputes(1)" class="btn-dark">刷新</button>
+            </div>
           </div>
 
           <div class="card p-4 mb-4 grid grid-cols-1 xl:grid-cols-5 gap-3">
@@ -536,7 +547,10 @@
         <section id="offlineSection" class="section hidden">
           <div class="section-header">
             <h2 class="title">线下服务管理</h2>
-            <button onclick="loadOfflineSection()" class="btn-dark">刷新</button>
+            <div class="flex gap-2">
+              <button onclick="clearSectionFilters('offline')" class="btn-gray">清空筛选</button>
+              <button onclick="loadOfflineSection()" class="btn-dark">刷新</button>
+            </div>
           </div>
 
           <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 mb-6">
@@ -788,7 +802,10 @@
         <section id="logsSection" class="section hidden">
           <div class="section-header">
             <h2 class="title">管理员操作日志</h2>
-            <button onclick="downloadExport('logs')" class="btn-dark">导出 CSV</button>
+            <div class="flex gap-2">
+              <button onclick="clearSectionFilters('logs')" class="btn-gray">清空筛选</button>
+              <button onclick="downloadExport('logs')" class="btn-dark">导出 CSV</button>
+            </div>
           </div>
 
           <div class="card p-4 mb-4 grid grid-cols-1 xl:grid-cols-6 gap-3">
@@ -827,7 +844,10 @@
         <section id="commercializationSection" class="section hidden">
           <div class="section-header">
             <h2 class="title">商业化管理</h2>
-            <button onclick="loadCommercializationSection()" class="btn-dark">刷新</button>
+            <div class="flex gap-2">
+              <button onclick="clearSectionFilters('commercialization')" class="btn-gray">清空筛选</button>
+              <button onclick="loadCommercializationSection()" class="btn-dark">刷新</button>
+            </div>
           </div>
 
           <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-6 gap-4 mb-6">
@@ -969,7 +989,7 @@
     <div id="detailDrawerBody" class="p-4 space-y-3 text-sm"></div>
   </aside>
 
-  <script src="app.js"></script>
+  <script src="app.js?v=20260603.2"></script>
 </body>
 </html>
 
@@ -1284,6 +1304,16 @@
     color: white;
   }
 
+  .admin-toast {
+    animation: toastIn 0.18s ease;
+  }
+
+  .admin-toast.toast-leave {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+    transition: all 0.18s ease;
+  }
+
   @keyframes fadeIn {
     from {
       opacity: 0;
@@ -1292,6 +1322,17 @@
     to {
       opacity: 1;
       transform: translateY(0);
+    }
+  }
+
+  @keyframes toastIn {
+    from {
+      opacity: 0;
+      transform: translateY(10px) scale(0.98);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
     }
   }
 </style>

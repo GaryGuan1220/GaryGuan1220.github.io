@@ -34,6 +34,13 @@ const state = {
   movingWorkflowSubmitting: false,
 };
 
+const adminDialogState = {
+  resolve: null,
+  escHandler: null,
+  config: null,
+  fields: [],
+};
+
 const MOVING_WORKFLOW_TIME_WHEEL_IDS = ['movingWorkflowEstimatedPickupAt', 'movingWorkflowEstimatedDeliveryAt'];
 
 function escapeHtml(value) {
@@ -71,6 +78,180 @@ function formatDateTime(value) {
     second: '2-digit',
     hour12: false,
   });
+}
+
+function maskEmail(value) {
+  const email = String(value || '').trim();
+  if (!email) return '-';
+  const atIndex = email.indexOf('@');
+  if (atIndex <= 1) return email;
+  const localPart = email.slice(0, atIndex);
+  const domainPart = email.slice(atIndex + 1);
+  const prefix = localPart.slice(0, 1);
+  const suffix = localPart.length > 2 ? localPart.slice(-1) : '';
+  return `${prefix}${localPart.length > 2 ? '***' : '*'}${suffix}@${domainPart}`;
+}
+
+function maskPhone(value) {
+  const phone = String(value || '').trim();
+  if (!phone) return '-';
+  const digits = phone.replace(/\D/g, '');
+  if (digits.length <= 4) return phone;
+  return `${digits.slice(0, Math.min(4, digits.length - 3))}****${digits.slice(-3)}`;
+}
+
+function maskContact(value) {
+  const contact = String(value || '').trim();
+  if (!contact) return '-';
+  if (contact.includes('@')) return maskEmail(contact);
+  if (/\d/.test(contact)) return maskPhone(contact);
+  return contact;
+}
+
+function humanizeLogKey(key) {
+  const map = {
+    action: '操作',
+    actionLabel: '操作名称',
+    amount: '金额',
+    adminNote: '管理员备注',
+    adminEmail: '管理员邮箱',
+    confirm: '二次确认',
+    contactPhone: '联系电话',
+    contactEmail: '联系邮箱',
+    email: '邮箱',
+    currentStatus: '当前状态',
+    deliveryFee: '配送费',
+    failedCount: '失败数量',
+    ids: 'ID 列表',
+    itemIds: '商品 ID 列表',
+    mode: '模式',
+    nextStatus: '变更后状态',
+    note: '备注',
+    orderId: '订单 ID',
+    prevPriority: '变更前优先级',
+    prevStatus: '变更前状态',
+    priority: '优先级',
+    quote: '报价',
+    reason: '原因',
+    requestedStatus: '请求状态',
+    rewardType: '奖励类型',
+    rewardValue: '奖励值',
+    sameStatus: '同状态提交',
+    serviceId: '服务单 ID',
+    source: '来源',
+    status: '状态',
+    successCount: '成功数量',
+    targetId: '目标 ID',
+    targetType: '目标类型',
+    phone: '电话',
+    mobile: '手机',
+    sellerEmail: '卖家邮箱',
+    buyerEmail: '买家邮箱',
+    reporterEmail: '举报人邮箱',
+    userEmail: '用户邮箱',
+    userId: '用户 ID',
+  };
+  if (map[key]) return map[key];
+  return String(key || '')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/_/g, ' ')
+    .trim()
+    .replace(/\b\w/g, (match) => match.toUpperCase());
+}
+
+function formatLogValue(value, key = '') {
+  if (value === null || value === undefined || value === '') return '-';
+  if (typeof value === 'boolean') return value ? '是' : '否';
+  if (Array.isArray(value)) {
+    return value.map((item) => formatLogValue(item, key)).filter(Boolean).join('，') || '-';
+  }
+  if (value instanceof Date) {
+    return formatDateTime(value);
+  }
+  if (typeof value === 'string') {
+    const normalizedKey = String(key || '').toLowerCase();
+    if (normalizedKey.includes('email') || (value.includes('@') && !/\s/.test(value))) {
+      return maskEmail(value);
+    }
+    if ((normalizedKey.includes('phone') || normalizedKey.includes('mobile') || normalizedKey.includes('tel')) && /\d/.test(value)) {
+      return maskPhone(value);
+    }
+    return value;
+  }
+  if (typeof value === 'object') {
+    const entries = Object.entries(value).slice(0, 6);
+    return entries.length
+      ? entries.map(([childKey, item]) => `${humanizeLogKey(childKey)}: ${formatLogValue(item, childKey)}`).join('；')
+      : '-';
+  }
+  return String(value);
+}
+
+function renderLogDetailsSummary(details) {
+  if (!details) return '<span class="text-gray-400">-</span>';
+  if (typeof details === 'string') {
+    return `<span class="break-all">${escapeHtml(details)}</span>`;
+  }
+  if (typeof details !== 'object') {
+    return `<span>${escapeHtml(String(details))}</span>`;
+  }
+
+  const preferredOrder = [
+    'reason',
+    'status',
+    'prevStatus',
+    'nextStatus',
+    'requestedStatus',
+    'action',
+    'ids',
+    'itemIds',
+    'serviceId',
+    'orderId',
+    'userId',
+    'targetType',
+    'targetId',
+    'rewardType',
+    'rewardValue',
+    'priority',
+    'confirm',
+    'quote',
+    'amount',
+    'note',
+    'adminNote',
+    'source',
+    'mode',
+    'sameStatus',
+    'successCount',
+    'failedCount',
+  ];
+
+  const entries = Object.entries(details).filter(([key]) => key !== 'schema');
+  entries.sort((left, right) => {
+    const leftIndex = preferredOrder.indexOf(left[0]);
+    const rightIndex = preferredOrder.indexOf(right[0]);
+    if (leftIndex === -1 && rightIndex === -1) return left[0].localeCompare(right[0]);
+    if (leftIndex === -1) return 1;
+    if (rightIndex === -1) return -1;
+    return leftIndex - rightIndex;
+  });
+
+  if (!entries.length) return '<span class="text-gray-400">-</span>';
+
+  return `
+    <div class="space-y-1">
+      ${entries
+        .slice(0, 8)
+        .map(
+          ([key, value]) => `
+            <div>
+              <span class="font-medium">${escapeHtml(humanizeLogKey(key))}：</span>
+              <span class="break-all">${escapeHtml(formatLogValue(value, key))}</span>
+            </div>
+          `
+        )
+        .join('')}
+    </div>
+  `;
 }
 
 function formatStatusBadge(label, type = 'default') {
@@ -345,12 +526,325 @@ function setHtml(id, html) {
   if (element) element.innerHTML = html;
 }
 
+function setInputValue(id, value) {
+  const element = document.getElementById(id);
+  if (element) element.value = value ?? '';
+}
+
+function setCheckboxValue(id, checked) {
+  const element = document.getElementById(id);
+  if (element) element.checked = Boolean(checked);
+}
+
+function normalizePreviewText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function getCardPreviewLabel(card, selectors = []) {
+  const list = Array.isArray(selectors) ? selectors : [selectors];
+  for (const selector of list) {
+    const element = card?.querySelector(selector);
+    const text = normalizePreviewText(element?.textContent || '');
+    if (text) return text;
+  }
+
+  return normalizePreviewText(card?.textContent || '').slice(0, 180);
+}
+
+function collectBatchPreview(checkboxSelector, labelSelectors = [], maxItems = 5) {
+  return [...document.querySelectorAll(checkboxSelector)]
+    .filter((checkbox) => checkbox.checked)
+    .map((checkbox) => {
+      const card = checkbox.closest('.card');
+      return getCardPreviewLabel(card, labelSelectors) || '未命名对象';
+    })
+    .filter(Boolean)
+    .slice(0, maxItems);
+}
+
+async function confirmBatchPreview(actionLabel, selectedCount, previewItems, context = '') {
+  const lines = previewItems.length
+    ? previewItems.map((item) => `<li class="break-words">${escapeHtml(item)}</li>`).join('')
+    : '<li class="text-gray-400">未找到可预览对象</li>';
+  const moreText =
+    selectedCount > previewItems.length
+      ? `<p class="mt-2 text-xs text-gray-500">另有 ${selectedCount - previewItems.length} 条未展示</p>`
+      : '';
+
+  const result = await openAdminDialog({
+    title: '批量操作预览',
+    subtitle: actionLabel,
+    bodyHtml: `
+      <div class="space-y-3 text-sm text-slate-700">
+        <p><span class="font-semibold">操作：</span>${escapeHtml(actionLabel)}</p>
+        <p><span class="font-semibold">已选择：</span>${selectedCount} 条${context ? ` · ${escapeHtml(context)}` : ''}</p>
+        <div class="rounded-xl border border-slate-200 bg-slate-50 p-3">
+          <p class="font-semibold mb-2">将处理的对象（最多显示 5 条）</p>
+          <ul class="list-disc pl-5 space-y-1">${lines}</ul>
+          ${moreText}
+        </div>
+        <p class="text-gray-500">确认后将继续填写原因并执行。</p>
+      </div>
+    `,
+    confirmText: '继续',
+    cancelText: '取消',
+    confirmVariant: 'danger',
+  });
+
+  return Boolean(result.confirmed);
+}
+
+function resetSectionFilters(sectionName) {
+  switch (sectionName) {
+    case 'users':
+      setInputValue('userSearch', '');
+      setInputValue('userBannedFilter', '');
+      setInputValue('userRoleFilter', '');
+      setInputValue('userMemberFilter', '');
+      setInputValue('userHasReportFilter', '');
+      setInputValue('userHasTradeFilter', '');
+      setInputValue('userDateFrom', '');
+      setInputValue('userDateTo', '');
+      setInputValue('userSortBy', 'createdAt');
+      setInputValue('userSortOrder', 'desc');
+      break;
+    case 'reports':
+      setInputValue('reportStatus', '');
+      setInputValue('reportTargetType', '');
+      setInputValue('reportSearch', '');
+      setInputValue('reportDateFrom', '');
+      setInputValue('reportDateTo', '');
+      setInputValue('reportSortBy', 'createdAt');
+      setInputValue('reportSortOrder', 'desc');
+      break;
+    case 'feedbacks':
+      setInputValue('feedbackType', '');
+      setInputValue('feedbackStatus', '');
+      setInputValue('feedbackPriority', '');
+      setInputValue('feedbackRewardStatus', '');
+      setInputValue('feedbackHasScreenshots', '');
+      setInputValue('feedbackDateFrom', '');
+      setInputValue('feedbackDateTo', '');
+      setInputValue('feedbackSearch', '');
+      break;
+    case 'items':
+      setInputValue('itemSearch', '');
+      setInputValue('itemSeller', '');
+      setInputValue('itemCategory', '');
+      setInputValue('itemCity', '');
+      setInputValue('itemStatus', '');
+      setInputValue('itemPinned', '');
+      setInputValue('itemUrgent', '');
+      setInputValue('itemHasReports', '');
+      setInputValue('itemMinPrice', '');
+      setInputValue('itemMaxPrice', '');
+      setInputValue('itemDateFrom', '');
+      setInputValue('itemDateTo', '');
+      break;
+    case 'orders':
+      setInputValue('orderSearch', '');
+      setInputValue('orderItemKeyword', '');
+      setInputValue('orderBuyer', '');
+      setInputValue('orderSeller', '');
+      setInputValue('orderStatus', '');
+      setInputValue('orderHasDispute', '');
+      setInputValue('orderMinAmount', '');
+      setInputValue('orderMaxAmount', '');
+      setInputValue('orderDateFrom', '');
+      setInputValue('orderDateTo', '');
+      break;
+    case 'transactions':
+      setInputValue('transactionType', '');
+      setInputValue('transactionSource', '');
+      setInputValue('transactionDateFrom', '');
+      setInputValue('transactionDateTo', '');
+      setInputValue('transactionMinAmount', '');
+      setInputValue('transactionMaxAmount', '');
+      break;
+    case 'disputes':
+      setInputValue('disputeReportStatus', 'PENDING');
+      setInputValue('disputeDateFrom', '');
+      setInputValue('disputeDateTo', '');
+      break;
+    case 'offline':
+      setInputValue('movingKeyword', '');
+      setInputValue('movingStatus', '');
+      setInputValue('movingDateFrom', '');
+      setInputValue('movingDateTo', '');
+      setInputValue('movingSortBy', 'appointment_asc');
+      setInputValue('movingScheduleDate', '');
+      setCheckboxValue('movingGroupByScheduleDate', true);
+      setInputValue('storageStatus', '');
+      setInputValue('storageDateFrom', '');
+      setInputValue('storageDateTo', '');
+      resetMovingWorkflowPanel();
+      break;
+    case 'logs':
+      setInputValue('logAction', '');
+      setInputValue('logTargetType', '');
+      setInputValue('logAdminId', '');
+      setInputValue('logDateFrom', '');
+      setInputValue('logDateTo', '');
+      setInputValue('logKeyword', '');
+      break;
+    case 'commercialization':
+      setInputValue('pinOrderSearch', '');
+      setInputValue('pinOrderStatus', '');
+      setInputValue('membershipSearch', '');
+      setInputValue('membershipStatus', '');
+      break;
+    default:
+      break;
+  }
+}
+
+async function clearSectionFilters(sectionName) {
+  resetSectionFilters(sectionName);
+  clearSelections();
+
+  switch (sectionName) {
+    case 'users':
+      await loadUsers(1);
+      break;
+    case 'reports':
+      await loadReports(1);
+      break;
+    case 'feedbacks':
+      await loadFeedbacks(1);
+      break;
+    case 'items':
+      await loadItems(1);
+      break;
+    case 'orders':
+      await loadOrders(1);
+      break;
+    case 'transactions':
+      await loadTransactions(1);
+      break;
+    case 'disputes':
+      await loadDisputes(1);
+      break;
+    case 'offline':
+      await loadOfflineSection();
+      break;
+    case 'logs':
+      await loadLogs(1);
+      break;
+    case 'commercialization':
+      await loadCommercializationSection();
+      break;
+    default:
+      break;
+  }
+}
+
+async function openSectionWithPreset(sectionName, presetKey) {
+  resetSectionFilters(sectionName);
+
+  switch (`${sectionName}:${presetKey}`) {
+    case 'reports:pending':
+      setInputValue('reportStatus', 'PENDING');
+      break;
+    case 'feedbacks:pending':
+      setInputValue('feedbackStatus', 'pending');
+      break;
+    case 'feedbacks:highPriorityBug':
+      setInputValue('feedbackType', 'BUG');
+      setInputValue('feedbackStatus', 'pending');
+      setInputValue('feedbackPriority', 'high');
+      break;
+    case 'disputes:pending':
+      setInputValue('disputeReportStatus', 'PENDING');
+      break;
+    case 'items:pendingReview':
+      setInputValue('itemStatus', 'PENDING_REVIEW');
+      break;
+    case 'offline:pending':
+      setInputValue('movingStatus', 'PENDING');
+      setInputValue('storageStatus', 'PENDING');
+      break;
+    case 'orders:pendingDispute':
+      setInputValue('orderHasDispute', 'true');
+      break;
+    case 'commercialization:paymentExceptions':
+      setInputValue('pinOrderStatus', 'FAILED');
+      break;
+    default:
+      break;
+  }
+
+  await showSection(sectionName);
+}
+
 function showError(message) {
-  alert(message);
+  showToast(message, 'error');
 }
 
 function showSuccess(message) {
-  alert(message);
+  showToast(message, 'success');
+}
+
+function ensureToastHost() {
+  let host = document.getElementById('adminToastHost');
+  if (host) return host;
+
+  host = document.createElement('div');
+  host.id = 'adminToastHost';
+  host.className = 'fixed bottom-5 right-5 z-[95] flex w-full max-w-sm flex-col gap-3 px-4 pointer-events-none';
+  document.body.appendChild(host);
+  return host;
+}
+
+function showToast(message, type = 'info') {
+  const host = ensureToastHost();
+  const toast = document.createElement('div');
+  const config = {
+    success: {
+      title: '成功',
+      icon: 'fa-circle-check',
+      container: 'border-emerald-200 bg-emerald-50 text-emerald-900 shadow-emerald-500/10',
+      accent: 'from-emerald-500 to-teal-500',
+    },
+    error: {
+      title: '错误',
+      icon: 'fa-triangle-exclamation',
+      container: 'border-rose-200 bg-rose-50 text-rose-900 shadow-rose-500/10',
+      accent: 'from-rose-500 to-red-500',
+    },
+    info: {
+      title: '提示',
+      icon: 'fa-circle-info',
+      container: 'border-slate-200 bg-slate-900 text-white shadow-slate-900/20',
+      accent: 'from-slate-700 to-slate-900',
+    },
+  }[type] || {
+    title: '提示',
+    icon: 'fa-circle-info',
+    container: 'border-slate-200 bg-slate-900 text-white shadow-slate-900/20',
+    accent: 'from-slate-700 to-slate-900',
+  };
+
+  toast.className = `admin-toast pointer-events-auto overflow-hidden rounded-2xl border backdrop-blur-xl ${config.container}`;
+  toast.innerHTML = `
+    <div class="flex items-start gap-3 p-4">
+      <div class="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br ${config.accent} text-white shadow-lg">
+        <i class="fas ${config.icon}"></i>
+      </div>
+      <div class="min-w-0 flex-1">
+        <p class="text-[11px] font-semibold uppercase tracking-[0.18em] ${type === 'error' ? 'text-rose-700' : type === 'success' ? 'text-emerald-700' : 'text-slate-300'}">${config.title}</p>
+        <p class="mt-1 whitespace-pre-line text-sm leading-6 ${type === 'info' ? 'text-white/90' : 'text-inherit'}">${escapeHtml(message)}</p>
+      </div>
+      <button type="button" class="rounded-lg px-2 py-1 text-lg leading-none ${type === 'error' ? 'text-rose-700 hover:bg-rose-100' : type === 'success' ? 'text-emerald-700 hover:bg-emerald-100' : 'text-white/70 hover:bg-white/10'}" aria-label="关闭提示">×</button>
+    </div>
+  `;
+
+  const close = () => {
+    toast.classList.add('toast-leave');
+    setTimeout(() => toast.remove(), 180);
+  };
+  toast.querySelector('button')?.addEventListener('click', close);
+  host.appendChild(toast);
+  setTimeout(close, 2800);
 }
 
 async function fetchCsrfToken() {
@@ -427,24 +921,315 @@ async function apiRequest(endpoint, options = {}, expectBlob = false) {
   return response.json();
 }
 
-function promptReason(actionLabel, required = true, minLength = 3) {
-  const text = prompt(`${actionLabel}\n请输入处理原因${required ? '（必填）' : '（可选）'}:`);
-  if (text === null) return null;
+function ensureAdminDialog() {
+  if (document.getElementById('adminActionModal')) return;
 
-  const reason = text.trim();
-  if (!required && !reason) return '';
+  const modal = document.createElement('div');
+  modal.id = 'adminActionModal';
+  modal.className = 'fixed inset-0 z-[80] hidden items-center justify-center px-4 py-6 bg-slate-950/60 backdrop-blur-md';
+  modal.innerHTML = `
+    <div class="absolute inset-0" style="background: radial-gradient(circle at top, rgba(248,113,113,.25), rgba(15,23,42,.62));" data-admin-modal-close="true"></div>
+    <div class="relative z-[81] flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-[28px] border border-white/10 bg-white shadow-[0_40px_120px_rgba(15,23,42,0.5)]">
+      <div class="relative overflow-hidden border-b border-white/10 bg-gradient-to-r from-slate-950 via-slate-900 to-rose-700 px-5 py-5 text-white">
+        <div class="absolute inset-0 opacity-40" style="background: radial-gradient(circle at top right, rgba(255,255,255,.22), transparent 38%), radial-gradient(circle at bottom left, rgba(251,191,36,.12), transparent 30%);"></div>
+        <div class="relative flex items-start justify-between gap-4">
+          <div class="min-w-0 flex items-start gap-3">
+            <div class="mt-1 flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-white/15 bg-white/10 text-xl shadow-lg shadow-black/10">
+              <i class="fas fa-shield-halved"></i>
+            </div>
+            <div class="min-w-0">
+              <p class="text-[11px] font-semibold uppercase tracking-[0.24em] text-white/70">CReuse Admin Workflow</p>
+              <h3 id="adminModalTitle" class="mt-1 text-2xl font-bold tracking-tight text-white">确认操作</h3>
+              <p id="adminModalSubtitle" class="mt-1 text-sm leading-6 text-white/80"></p>
+            </div>
+          </div>
+          <button
+            type="button"
+            class="rounded-full border border-white/15 bg-white/10 px-3 py-1.5 text-lg leading-none text-white/80 transition hover:bg-white/20 hover:text-white"
+            data-admin-modal-close="true"
+            aria-label="关闭弹窗"
+          >
+            ×
+          </button>
+        </div>
+      </div>
+      <div class="overflow-y-auto bg-slate-50 px-5 py-5">
+        <div id="adminModalBody" class="rounded-2xl border border-slate-200 bg-white px-4 py-4 text-sm text-slate-700 shadow-sm"></div>
+        <form id="adminModalForm" class="mt-4 space-y-3"></form>
+        <p id="adminModalError" class="mt-4 hidden rounded-2xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700"></p>
+      </div>
+      <div class="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 bg-white px-5 py-4">
+        <button type="button" id="adminModalCancel" class="rounded-xl border border-slate-300 bg-white px-4 py-2.5 font-semibold text-slate-700 transition hover:bg-slate-50">取消</button>
+        <button type="button" id="adminModalConfirm" class="rounded-xl bg-gradient-to-r from-rose-600 to-orange-500 px-4 py-2.5 font-semibold text-white shadow-lg shadow-rose-500/20 transition hover:from-rose-500 hover:to-orange-400">确认</button>
+      </div>
+    </div>
+  `;
 
-  if (reason.length < minLength) {
-    showError(`处理原因至少 ${minLength} 个字符`);
-    return null;
-  }
-
-  return reason;
+  document.body.appendChild(modal);
 }
 
-function confirmCriticalAction(actionLabel, reason) {
+function buildAdminModalField(field, index) {
+  const commonInputClass =
+    'w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none transition focus:border-red-500 focus:ring-2 focus:ring-red-500/20';
+  const label = escapeHtml(field.label || `字段 ${index + 1}`);
+  const placeholder = escapeHtml(field.placeholder || '');
+  const value = field.value ?? '';
+  const requiredBadge = field.required ? '<span class="ml-1 text-red-500">*</span>' : '';
+  const helper = field.helperText
+    ? `<p class="text-xs text-slate-500">${escapeHtml(field.helperText)}</p>`
+    : '';
+
+  if (field.type === 'textarea') {
+    return `
+      <label class="block space-y-2">
+        <span class="block text-sm font-medium text-slate-700">${label}${requiredBadge}</span>
+        <textarea
+          data-admin-modal-field-index="${index}"
+          rows="${field.rows || 4}"
+          class="${commonInputClass} resize-y"
+          placeholder="${placeholder}"
+        >${escapeHtml(value)}</textarea>
+        ${helper}
+      </label>
+    `;
+  }
+
+  if (field.type === 'checkbox') {
+    return `
+      <label class="flex items-center gap-3 rounded-xl border border-slate-200 px-3 py-2">
+        <input data-admin-modal-field-index="${index}" type="checkbox" ${field.checked ? 'checked' : ''} class="h-4 w-4 rounded border-slate-300 text-red-600 focus:ring-red-500" />
+        <div>
+          <span class="block text-sm font-medium text-slate-700">${label}</span>
+          ${helper}
+        </div>
+      </label>
+    `;
+  }
+
+  return `
+    <label class="block space-y-2">
+      <span class="block text-sm font-medium text-slate-700">${label}${requiredBadge}</span>
+      <input
+        data-admin-modal-field-index="${index}"
+        type="${escapeHtml(field.type || 'text')}"
+        value="${escapeHtml(value)}"
+        placeholder="${placeholder}"
+        class="${commonInputClass}"
+      />
+      ${helper}
+    </label>
+  `;
+}
+
+function getAdminModalElements() {
+  ensureAdminDialog();
+  const modal = document.getElementById('adminActionModal');
+  if (!modal) return null;
+  return {
+    modal,
+    title: modal.querySelector('#adminModalTitle'),
+    subtitle: modal.querySelector('#adminModalSubtitle'),
+    body: modal.querySelector('#adminModalBody'),
+    form: modal.querySelector('#adminModalForm'),
+    error: modal.querySelector('#adminModalError'),
+    cancel: modal.querySelector('#adminModalCancel'),
+    confirm: modal.querySelector('#adminModalConfirm'),
+  };
+}
+
+function closeAdminDialog(result = { confirmed: false }) {
+  const elements = getAdminModalElements();
+  if (elements?.modal) {
+    elements.modal.classList.add('hidden');
+    elements.modal.classList.remove('flex');
+  }
+  document.body.classList.remove('overflow-hidden');
+  if (adminDialogState.escHandler) {
+    document.removeEventListener('keydown', adminDialogState.escHandler);
+    adminDialogState.escHandler = null;
+  }
+  if (adminDialogState.resolve) {
+    const resolve = adminDialogState.resolve;
+    adminDialogState.resolve = null;
+    adminDialogState.fields = [];
+    adminDialogState.config = null;
+    resolve(result);
+  }
+}
+
+function showAdminDialogError(message) {
+  const elements = getAdminModalElements();
+  if (!elements?.error) return;
+  elements.error.textContent = message;
+  elements.error.classList.remove('hidden');
+}
+
+function clearAdminDialogError() {
+  const elements = getAdminModalElements();
+  if (!elements?.error) return;
+  elements.error.textContent = '';
+  elements.error.classList.add('hidden');
+}
+
+async function openAdminDialog(config = {}) {
+  const elements = getAdminModalElements();
+  if (!elements) return { confirmed: false };
+
+  if (adminDialogState.resolve) {
+    closeAdminDialog({ confirmed: false });
+  }
+
+  adminDialogState.config = {
+    title: config.title || '确认操作',
+    subtitle: config.subtitle || '',
+    bodyHtml: config.bodyHtml || '',
+    fields: Array.isArray(config.fields) ? config.fields : [],
+    confirmText: config.confirmText || '确认',
+    cancelText: config.cancelText || '取消',
+    confirmVariant: config.confirmVariant || 'danger',
+  };
+  adminDialogState.fields = adminDialogState.config.fields;
+
+  elements.title.textContent = adminDialogState.config.title;
+  elements.subtitle.textContent = adminDialogState.config.subtitle;
+  elements.body.innerHTML = adminDialogState.config.bodyHtml;
+  elements.form.innerHTML = adminDialogState.config.fields.map((field, index) => buildAdminModalField(field, index)).join('');
+  elements.confirm.textContent = adminDialogState.config.confirmText;
+  elements.cancel.textContent = adminDialogState.config.cancelText;
+  elements.confirm.className =
+    adminDialogState.config.confirmVariant === 'dark'
+      ? 'rounded-xl bg-slate-900 px-4 py-2.5 font-semibold text-white shadow-lg shadow-slate-900/20 transition hover:bg-slate-800'
+      : 'rounded-xl bg-gradient-to-r from-rose-600 to-orange-500 px-4 py-2.5 font-semibold text-white shadow-lg shadow-rose-500/20 transition hover:from-rose-500 hover:to-orange-400';
+  clearAdminDialogError();
+
+  elements.modal.classList.remove('hidden');
+  elements.modal.classList.add('flex');
+  document.body.classList.add('overflow-hidden');
+
+  return new Promise((resolve) => {
+    adminDialogState.resolve = resolve;
+
+    adminDialogState.escHandler = (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeAdminDialog({ confirmed: false });
+      }
+    };
+    document.addEventListener('keydown', adminDialogState.escHandler);
+
+    const submit = () => {
+      clearAdminDialogError();
+      const values = {};
+
+      for (const [index, field] of adminDialogState.fields.entries()) {
+        const fieldElement = elements.form.querySelector(`[data-admin-modal-field-index="${index}"]`);
+        if (!fieldElement) continue;
+
+        let value;
+        if (field.type === 'checkbox') {
+          value = Boolean(fieldElement.checked);
+        } else {
+          value = String(fieldElement.value || '').trim();
+        }
+
+        if (field.required && field.type !== 'checkbox' && !value) {
+          showAdminDialogError(field.requiredMessage || `${field.label || '该字段'}不能为空`);
+          fieldElement.focus();
+          return;
+        }
+
+        if (field.minLength && field.type !== 'checkbox' && value && String(value).length < field.minLength) {
+          showAdminDialogError(field.minLengthMessage || `${field.label || '该字段'}至少需要 ${field.minLength} 个字符`);
+          fieldElement.focus();
+          return;
+        }
+
+        values[field.name || `field_${index}`] = value;
+      }
+
+      closeAdminDialog({ confirmed: true, values });
+    };
+
+    elements.cancel.onclick = () => closeAdminDialog({ confirmed: false });
+    elements.confirm.onclick = submit;
+    elements.form.onsubmit = (event) => {
+      event.preventDefault();
+      submit();
+    };
+
+    elements.modal.querySelectorAll('[data-admin-modal-close="true"]').forEach((button) => {
+      button.onclick = () => closeAdminDialog({ confirmed: false });
+    });
+
+    const firstField = elements.form.querySelector('input, textarea, select');
+    if (firstField) {
+      setTimeout(() => firstField.focus(), 0);
+    }
+  });
+}
+
+async function promptText(message, defaultValue = '', options = {}) {
+  const result = await openAdminDialog({
+    title: options.title || message,
+    subtitle: options.subtitle || '',
+    bodyHtml: options.bodyHtml || `<p class="text-sm text-slate-600 whitespace-pre-line">${escapeHtml(message)}</p>`,
+    fields: [
+      {
+        name: 'value',
+        label: options.label || message,
+        type: options.multiline ? 'textarea' : options.type || 'text',
+        value: defaultValue,
+        placeholder: options.placeholder || message,
+        required: options.required !== false,
+        minLength: options.minLength || 0,
+        minLengthMessage: options.minLengthMessage,
+        requiredMessage: options.requiredMessage,
+        rows: options.rows || 4,
+      },
+    ],
+    confirmText: options.confirmText || '确认',
+    cancelText: options.cancelText || '取消',
+    confirmVariant: options.confirmVariant || 'danger',
+  });
+
+  if (!result.confirmed) return null;
+  const value = String(result.values?.value ?? '').trim();
+  if (options.required === false && !value) return '';
+  return value;
+}
+
+async function promptReason(actionLabel, required = true, minLength = 3) {
+  const text = await promptText(`${actionLabel}\n请输入处理原因${required ? '（必填）' : '（可选）'}:`, '', {
+    title: actionLabel,
+    label: '处理原因',
+    multiline: true,
+    required,
+    minLength,
+    confirmText: '确认提交',
+    confirmVariant: 'danger',
+    placeholder: required ? '请输入处理原因' : '可选备注',
+  });
+  if (text === null) return null;
+  return text;
+}
+
+async function confirmCriticalAction(actionLabel, reason) {
   const operator = adminUser?.nickname || adminUser?.email || '管理员';
-  return confirm(`请确认操作：${actionLabel}\n操作人：${operator}\n原因：${reason || '无'}`);
+  const result = await openAdminDialog({
+    title: '确认操作',
+    subtitle: actionLabel,
+    bodyHtml: `
+      <div class="space-y-3 text-sm text-slate-700">
+        <p><span class="font-semibold">请确认操作：</span>${escapeHtml(actionLabel)}</p>
+        <p><span class="font-semibold">操作人：</span>${escapeHtml(operator)}</p>
+        <p><span class="font-semibold">原因：</span>${escapeHtml(reason || '无')}</p>
+      </div>
+    `,
+    confirmText: '确认执行',
+    cancelText: '返回修改',
+    confirmVariant: 'danger',
+  });
+  return Boolean(result.confirmed);
 }
 
 function openDetailDrawer(title, html) {
@@ -599,8 +1384,16 @@ async function login() {
   }
 }
 
-function logout() {
-  if (!confirm('确定要退出登录吗？')) return;
+async function logout() {
+  const result = await openAdminDialog({
+    title: '退出登录',
+    subtitle: '确认后将清除本地管理员会话',
+    bodyHtml: '<p class="text-sm text-slate-700">确定要退出登录吗？</p>',
+    confirmText: '确认退出',
+    cancelText: '取消',
+    confirmVariant: 'dark',
+  });
+  if (!result.confirmed) return;
   localStorage.removeItem('adminToken');
   localStorage.removeItem('adminUser');
   authToken = '';
@@ -704,14 +1497,14 @@ async function loadDashboard() {
 
     const todos = stats.todos || {};
     const todoHtml = `
-      <button onclick="showSection('reports')" class="w-full text-left border rounded p-2 hover:bg-gray-50">待处理举报：${todos.pendingReports || 0}</button>
-      <button onclick="showSection('feedbacks')" class="w-full text-left border rounded p-2 hover:bg-gray-50">待处理反馈：${todos.pendingFeedbacks || 0}</button>
-      <button onclick="showSection('disputes')" class="w-full text-left border rounded p-2 hover:bg-gray-50">待处理纠纷：${todos.pendingDisputes || 0}</button>
-      <button onclick="showSection('items')" class="w-full text-left border rounded p-2 hover:bg-gray-50">待审核商品：${todos.pendingReviewItems || 0}</button>
-      <button onclick="showSection('offline')" class="w-full text-left border rounded p-2 hover:bg-gray-50">待处理线下服务：${todos.pendingOfflineServices || 0}</button>
-      <button onclick="showSection('orders')" class="w-full text-left border rounded p-2 hover:bg-gray-50">待处理取消订单：${todos.pendingCancelOrders || 0}</button>
-      <button onclick="showSection('commercialization')" class="w-full text-left border rounded p-2 hover:bg-gray-50">置顶支付异常：${todos.paymentExceptions || 0}</button>
-      <button onclick="showSection('feedbacks')" class="w-full text-left border rounded p-2 hover:bg-gray-50">高优先级 Bug：${todos.highPriorityBugs || 0}</button>
+      <button onclick="openSectionWithPreset('reports', 'pending')" class="w-full text-left border rounded p-2 hover:bg-gray-50">待处理举报：${todos.pendingReports || 0}</button>
+      <button onclick="openSectionWithPreset('feedbacks', 'pending')" class="w-full text-left border rounded p-2 hover:bg-gray-50">待处理反馈：${todos.pendingFeedbacks || 0}</button>
+      <button onclick="openSectionWithPreset('disputes', 'pending')" class="w-full text-left border rounded p-2 hover:bg-gray-50">待处理纠纷：${todos.pendingDisputes || 0}</button>
+      <button onclick="openSectionWithPreset('items', 'pendingReview')" class="w-full text-left border rounded p-2 hover:bg-gray-50">待审核商品：${todos.pendingReviewItems || 0}</button>
+      <button onclick="openSectionWithPreset('offline', 'pending')" class="w-full text-left border rounded p-2 hover:bg-gray-50">待处理线下服务：${todos.pendingOfflineServices || 0}</button>
+      <button onclick="openSectionWithPreset('orders', 'pendingDispute')" class="w-full text-left border rounded p-2 hover:bg-gray-50">待处理取消订单：${todos.pendingCancelOrders || 0}</button>
+      <button onclick="openSectionWithPreset('commercialization', 'paymentExceptions')" class="w-full text-left border rounded p-2 hover:bg-gray-50">置顶支付异常：${todos.paymentExceptions || 0}</button>
+      <button onclick="openSectionWithPreset('feedbacks', 'highPriorityBug')" class="w-full text-left border rounded p-2 hover:bg-gray-50">高优先级 Bug：${todos.highPriorityBugs || 0}</button>
     `;
     setHtml('dashboardTodos', todoHtml);
   } catch (error) {
@@ -798,7 +1591,7 @@ async function loadUsers(page = 1) {
               <td class="td">${user.id}</td>
               <td class="td">${avatar}</td>
               <td class="td">${escapeHtml(user.nickname || '未设置')}</td>
-              <td class="td">${escapeHtml(user.email || '-')}</td>
+              <td class="td">${escapeHtml(maskEmail(user.email || '-'))}</td>
               <td class="td">${roleTag}</td>
               <td class="td">${user._count?.items || 0}</td>
               <td class="td">${user.completedTrades || user._count?.buyerOrders || 0}</td>
@@ -830,13 +1623,13 @@ async function loadUsers(page = 1) {
 async function toggleUserBan(userId, willBan) {
   let reason = '';
   if (willBan) {
-    reason = promptReason('封禁用户', true) || '';
+    reason = (await promptReason('封禁用户', true)) || '';
     if (!reason) return;
   } else {
-    reason = promptReason('解封用户（可选备注）', false) ?? '';
+    reason = (await promptReason('解封用户（可选备注）', false)) ?? '';
   }
 
-  if (!confirmCriticalAction(willBan ? '封禁用户' : '解封用户', reason)) return;
+  if (!(await confirmCriticalAction(willBan ? '封禁用户' : '解封用户', reason))) return;
 
   try {
     await apiRequest(`/admin/users/${userId}/ban`, {
@@ -869,15 +1662,20 @@ function toggleSelectAllUsers(checked) {
 }
 
 async function changeUserRole(userId, currentRole) {
-  const nextRole = (prompt('输入角色（admin/user）', currentRole || 'user') || '').trim().toLowerCase();
+  const nextRole = (await promptText('输入角色（admin/user）', currentRole || 'user', {
+    title: '修改用户角色',
+    label: '角色',
+    confirmText: '继续',
+    confirmVariant: 'dark',
+  }))?.toLowerCase?.() || '';
   if (!nextRole) return;
   if (!['admin', 'user'].includes(nextRole)) {
     showError('角色仅支持 admin 或 user');
     return;
   }
-  const reason = promptReason('修改用户角色', true);
+  const reason = await promptReason('修改用户角色', true);
   if (reason === null) return;
-  if (!confirmCriticalAction(`修改用户角色为 ${nextRole}`, reason)) return;
+  if (!(await confirmCriticalAction(`修改用户角色为 ${nextRole}`, reason))) return;
 
   try {
     await apiRequest(`/admin/users/${userId}/role`, {
@@ -891,15 +1689,20 @@ async function changeUserRole(userId, currentRole) {
 }
 
 async function changeUserPublishPermission(userId, currentStatus) {
-  const input = (prompt('输入发布权限状态（ACTIVE/PAUSED）', currentStatus || 'ACTIVE') || '').trim().toUpperCase();
+  const input = (await promptText('输入发布权限状态（ACTIVE/PAUSED）', currentStatus || 'ACTIVE', {
+    title: '修改发布权限',
+    label: '发布权限状态',
+    confirmText: '继续',
+    confirmVariant: 'dark',
+  }))?.toUpperCase?.() || '';
   if (!input) return;
   if (!['ACTIVE', 'PAUSED'].includes(input)) {
     showError('仅支持 ACTIVE / PAUSED');
     return;
   }
-  const reason = promptReason(input === 'PAUSED' ? '暂停发布权限' : '恢复发布权限', true);
+  const reason = await promptReason(input === 'PAUSED' ? '暂停发布权限' : '恢复发布权限', true);
   if (reason === null) return;
-  if (!confirmCriticalAction(`发布权限改为 ${input}`, reason)) return;
+  if (!(await confirmCriticalAction(`发布权限改为 ${input}`, reason))) return;
 
   try {
     await apiRequest(`/admin/users/${userId}/publish-permission`, {
@@ -913,9 +1716,15 @@ async function changeUserPublishPermission(userId, currentStatus) {
 }
 
 async function addUserAdminNote(userId) {
-  const note = prompt('输入管理员备注：') || '';
+  const note = (await promptText('输入管理员备注：', '', {
+    title: '添加管理员备注',
+    label: '管理员备注',
+    multiline: true,
+    confirmText: '保存',
+    confirmVariant: 'dark',
+  })) || '';
   if (!note.trim()) return;
-  if (!confirmCriticalAction('添加管理员备注', note.trim())) return;
+  if (!(await confirmCriticalAction('添加管理员备注', note.trim()))) return;
 
   try {
     await apiRequest(`/admin/users/${userId}/notes`, {
@@ -956,14 +1765,14 @@ async function openUserDetail(userId) {
     const publishPermission = data.publishPermission || {};
     const adminLogs = (data.adminLogs || [])
       .slice(0, 12)
-      .map((log) => `<li>${formatDateTime(log.createdAt)} · ${escapeHtml(log.action)} · ${escapeHtml(log.admin?.nickname || log.admin?.email || '-')}</li>`)
+      .map((log) => `<li>${formatDateTime(log.createdAt)} · ${escapeHtml(log.action)} · ${escapeHtml(log.admin?.nickname || maskEmail(log.admin?.email) || '-')}</li>`)
       .join('');
 
     const html = `
       <div class="space-y-3">
         <div><span class="font-semibold">用户ID：</span>${user.id}</div>
         <div><span class="font-semibold">昵称：</span>${escapeHtml(user.nickname || '-')}</div>
-        <div><span class="font-semibold">邮箱：</span>${escapeHtml(user.email || '-')}</div>
+        <div><span class="font-semibold">邮箱：</span>${escapeHtml(maskEmail(user.email || '-'))}</div>
         <div><span class="font-semibold">注册时间：</span>${formatDateTime(user.createdAt)}</div>
         <div><span class="font-semibold">更新时间：</span>${formatDateTime(user.updatedAt)}</div>
         <div><span class="font-semibold">角色：</span>${user.isAdmin ? 'admin' : 'user'}</div>
@@ -1055,6 +1864,82 @@ function feedbackRewardBadge(rewardStatus) {
   return `<span class="px-2 py-1 rounded text-xs ${cls}">${escapeHtml(value || 'none')}</span>`;
 }
 
+function getOrderNextActions(status) {
+  const normalized = String(status || '').toUpperCase();
+  if (normalized === 'PENDING') return ['PAID', 'CANCELED', 'FAILED'];
+  if (normalized === 'PAID') return ['SHIPPED', 'CANCELED', 'DISPUTED', 'REFUNDED'];
+  if (normalized === 'SHIPPED') return ['COMPLETED', 'DISPUTED', 'REFUNDED'];
+  if (normalized === 'DISPUTED') return ['REFUNDED', 'COMPLETED'];
+  return [];
+}
+
+function orderStatusActionLabel(status) {
+  const map = {
+    PAID: '确认支付',
+    SHIPPED: '标记发货',
+    COMPLETED: '标记完成',
+    CANCELED: '标记取消',
+    DISPUTED: '标记纠纷',
+    REFUNDED: '标记退款',
+    FAILED: '标记失败',
+  };
+  return map[String(status || '').toUpperCase()] || String(status || '').toUpperCase();
+}
+
+function orderStatusActionButtonClass(status) {
+  const normalized = String(status || '').toUpperCase();
+  if (normalized === 'PAID' || normalized === 'SHIPPED' || normalized === 'COMPLETED') return 'btn-gray';
+  return 'btn-red';
+}
+
+function renderOrderActionButtons(order) {
+  const actions = getOrderNextActions(order.status);
+  if (!actions.length) {
+    return '<span class="text-xs text-gray-500">当前状态无需后台操作</span>';
+  }
+
+  return actions
+    .map(
+      (action) =>
+        `<button onclick="setOrderStatus(${order.id}, '${action}')" class="${orderStatusActionButtonClass(action)}">${orderStatusActionLabel(action)}</button>`
+    )
+    .join('');
+}
+
+function getStorageNextActions(status) {
+  const normalized = String(status || '').toUpperCase();
+  if (normalized === 'PENDING') return ['ACTIVE'];
+  if (normalized === 'ACTIVE') return ['COMPLETED', 'EXPIRED'];
+  return [];
+}
+
+function storageStatusActionLabel(status) {
+  const map = {
+    ACTIVE: '激活',
+    COMPLETED: '完成',
+    EXPIRED: '过期',
+  };
+  return map[String(status || '').toUpperCase()] || String(status || '').toUpperCase();
+}
+
+function storageStatusActionButtonClass(status) {
+  return String(status || '').toUpperCase() === 'ACTIVE' ? 'btn-gray' : 'btn-red';
+}
+
+function renderStorageActionButtons(order) {
+  const actions = getStorageNextActions(order.status);
+  if (!actions.length) {
+    return '<span class="text-xs text-gray-500">当前状态无需后台操作</span>';
+  }
+
+  return actions
+    .map(
+      (action) =>
+        `<button onclick="updateStorageStatus(${order.id}, '${action}')" class="${storageStatusActionButtonClass(action)}">${storageStatusActionLabel(action)}</button>`
+    )
+    .join('');
+}
+
 async function loadReports(page = 1) {
   state.currentPage.reports = page;
 
@@ -1105,7 +1990,7 @@ async function loadReports(page = 1) {
                   <p class="text-sm text-gray-700">举报理由：${escapeHtml(report.reason || '-')}</p>
                   <p class="text-sm text-gray-700">详情：${escapeHtml(report.description || '-')}</p>
                   <p class="text-sm text-gray-700">举报人：${escapeHtml(report.reporter?.nickname || '未知')} (${escapeHtml(
-          report.reporter?.email || '-'
+          maskEmail(report.reporter?.email || '-')
         )})</p>
                   <p class="text-xs text-gray-500 mt-1">创建于 ${formatDateTime(report.createdAt)}</p>
                 </div>
@@ -1166,10 +2051,33 @@ function toggleSelectAllReports(checked) {
 }
 
 async function assignReport(reportId) {
-  const assigneeRaw = prompt('输入要指派的管理员ID（留空=指派给自己）：') || '';
-  const priorityRaw = (prompt('输入优先级（LOW/MEDIUM/HIGH）', 'MEDIUM') || 'MEDIUM').toUpperCase();
-  const dueAtRaw = prompt('输入SLA截止时间（可选，例如 2026-05-01 18:00）：') || '';
-  const note = prompt('输入指派备注（可选）：') || '';
+  const assigneeRaw = (await promptText('输入要指派的管理员ID（留空=指派给自己）：', '', {
+    title: '指派举报',
+    label: '管理员ID',
+    confirmText: '继续',
+    confirmVariant: 'dark',
+  })) || '';
+  const priorityRaw = ((await promptText('输入优先级（LOW/MEDIUM/HIGH）', 'MEDIUM', {
+    title: '指派举报',
+    label: '优先级',
+    confirmText: '继续',
+    confirmVariant: 'dark',
+  })) || 'MEDIUM').toUpperCase();
+  const dueAtRaw = (await promptText('输入SLA截止时间（可选，例如 2026-05-01 18:00）：', '', {
+    title: '指派举报',
+    label: 'SLA 截止时间',
+    required: false,
+    confirmText: '继续',
+    confirmVariant: 'dark',
+  })) || '';
+  const note = (await promptText('输入指派备注（可选）：', '', {
+    title: '指派举报',
+    label: '指派备注',
+    multiline: true,
+    required: false,
+    confirmText: '继续',
+    confirmVariant: 'dark',
+  })) || '';
 
   let dueAt;
   if (dueAtRaw.trim()) {
@@ -1201,9 +2109,9 @@ async function assignReport(reportId) {
 async function resolveReport(reportId, action) {
   const actionLabel =
     action === 'DELETE_CONTENT' ? '删除举报内容' : action === 'BAN_USER' ? '封禁被举报用户' : '驳回举报';
-  const reason = promptReason(actionLabel, true);
+  const reason = await promptReason(actionLabel, true);
   if (reason === null) return;
-  if (!confirmCriticalAction(actionLabel, reason)) return;
+  if (!(await confirmCriticalAction(actionLabel, reason))) return;
 
   try {
     await apiRequest(`/admin/reports/${reportId}/resolve`, {
@@ -1238,7 +2146,7 @@ async function openReportDetail(reportId) {
 
     const logsHtml = logs.length
       ? `<ul class="list-disc pl-5">${logs
-          .map((log) => `<li>${formatDateTime(log.createdAt)} · ${escapeHtml(log.action)} · ${escapeHtml(log.admin?.nickname || log.admin?.email || '-')}</li>`)
+          .map((log) => `<li>${formatDateTime(log.createdAt)} · ${escapeHtml(log.action)} · ${escapeHtml(log.admin?.nickname || maskEmail(log.admin?.email) || '-')}</li>`)
           .join('')}</ul>`
       : '<p class="text-gray-500">暂无日志</p>';
 
@@ -1250,8 +2158,8 @@ async function openReportDetail(reportId) {
         <div><span class="font-semibold">举报类型：</span>${escapeHtml(report.reason || '-')}</div>
         <div><span class="font-semibold">对象：</span>${escapeHtml(report.targetType)}#${report.targetId}</div>
         <div><span class="font-semibold">描述：</span>${escapeHtml(report.description || '-')}</div>
-        <div><span class="font-semibold">举报人：</span>${escapeHtml(data.reporter?.nickname || data.reporter?.email || '-')}</div>
-        <div><span class="font-semibold">被举报对象：</span>${escapeHtml(target?.title || target?.nickname || target?.email || '-')}</div>
+        <div><span class="font-semibold">举报人：</span>${escapeHtml(data.reporter?.nickname || maskEmail(data.reporter?.email) || '-')}</div>
+        <div><span class="font-semibold">被举报对象：</span>${escapeHtml(target?.title || target?.nickname || maskEmail(target?.email) || '-')}</div>
         <div><span class="font-semibold">创建时间：</span>${formatDateTime(report.createdAt)}</div>
         <div><span class="font-semibold">更新时间：</span>${formatDateTime(report.updatedAt)}</div>
         <hr />
@@ -1273,12 +2181,22 @@ async function openReportDetail(reportId) {
 }
 
 async function updateReportStatus(reportId) {
-  const status = (prompt('输入状态（pending/reviewing/valid/invalid/duplicate/resolved/closed）', 'reviewing') || '').trim();
+  const status = (await promptText('输入状态（pending/reviewing/valid/invalid/duplicate/resolved/closed）', 'reviewing', {
+    title: '更新举报状态',
+    label: '状态',
+    confirmText: '继续',
+    confirmVariant: 'dark',
+  })) || '';
   if (!status) return;
-  const priority = (prompt('输入优先级（LOW/MEDIUM/HIGH）', 'MEDIUM') || '').trim().toUpperCase();
-  const reason = promptReason('更新举报状态', true);
+  const priority = ((await promptText('输入优先级（LOW/MEDIUM/HIGH）', 'MEDIUM', {
+    title: '更新举报状态',
+    label: '优先级',
+    confirmText: '继续',
+    confirmVariant: 'dark',
+  })) || '').toUpperCase();
+  const reason = await promptReason('更新举报状态', true);
   if (reason === null) return;
-  if (!confirmCriticalAction(`更新举报状态为 ${status}`, reason)) return;
+  if (!(await confirmCriticalAction(`更新举报状态为 ${status}`, reason))) return;
 
   try {
     await apiRequest(`/admin/reports/${reportId}/status`, {
@@ -1300,10 +2218,12 @@ async function batchResolveReports(action) {
 
   const actionLabel =
     action === 'DELETE_CONTENT' ? '批量删除内容' : action === 'BAN_USER' ? '批量封禁用户' : '批量驳回举报';
+  const previewItems = collectBatchPreview('.report-checkbox', ['p.font-semibold'], 5);
+  if (!(await confirmBatchPreview(actionLabel, ids.length, previewItems, '举报处理'))) return;
 
-  const reason = promptReason(actionLabel, true);
+  const reason = await promptReason(actionLabel, true);
   if (reason === null) return;
-  if (!confirmCriticalAction(`${actionLabel}（${ids.length}条）`, reason)) return;
+  if (!(await confirmCriticalAction(`${actionLabel}（${ids.length}条）`, reason))) return;
 
   try {
     const result = await apiRequest('/admin/reports/batch-resolve', {
@@ -1365,7 +2285,7 @@ async function loadFeedbacks(page = 1) {
               <div>
                 <p class="font-semibold">#${feedback.id} · ${escapeHtml(feedback.title || '-')}</p>
                 <p class="text-sm text-gray-700">${escapeHtml(feedback.type || '-')} · 用户：${escapeHtml(
-          feedback.user?.nickname || feedback.user?.email || `#${feedback.user?.id || '-'}`
+          feedback.user?.nickname || maskEmail(feedback.user?.email) || `#${feedback.user?.id || '-'}`
         )}</p>
                 <p class="text-xs text-gray-500">提交时间：${formatDateTime(feedback.createdAt)} · App版本：${escapeHtml(
           feedback.appVersion || '-'
@@ -1431,7 +2351,7 @@ async function openFeedbackDetail(feedbackId) {
             (reward) =>
               `<li>${formatDateTime(reward.createdAt)} · ${escapeHtml(reward.rewardType)} ${
                 reward.rewardValue ? `(${escapeHtml(reward.rewardValue)})` : ''
-              } · 操作人：${escapeHtml(reward.admin?.nickname || reward.admin?.email || '-')} · 备注：${escapeHtml(
+              } · 操作人：${escapeHtml(reward.admin?.nickname || maskEmail(reward.admin?.email) || '-')} · 备注：${escapeHtml(
                 reward.note || '-'
               )}</li>`
           )
@@ -1449,7 +2369,7 @@ async function openFeedbackDetail(feedbackId) {
         <div><span class="font-semibold">实际结果：</span>${escapeHtml(feedback.actualResult || '-')}</div>
         <div><span class="font-semibold">复现步骤：</span>${escapeHtml(feedback.reproduceSteps || '-')}</div>
         <div><span class="font-semibold">重复出现：</span>${feedback.isRecurring === null || feedback.isRecurring === undefined ? '-' : feedback.isRecurring ? '是' : '否'}</div>
-        <div><span class="font-semibold">联系方式：</span>${escapeHtml(feedback.contact || '-')}</div>
+        <div><span class="font-semibold">联系方式：</span>${escapeHtml(maskContact(feedback.contact || '-'))}</div>
         <div><span class="font-semibold">状态：</span>${feedbackStatusBadge(feedback.status)}</div>
         <div><span class="font-semibold">优先级：</span>${feedbackPriorityBadge(feedback.priority)}</div>
         <div><span class="font-semibold">奖励状态：</span>${feedbackRewardBadge(feedback.rewardStatus)}</div>
@@ -1467,7 +2387,7 @@ async function openFeedbackDetail(feedbackId) {
         <hr />
         <div>
           <p class="font-semibold">关联信息</p>
-          <p>用户：${escapeHtml(feedback.user?.nickname || '-')} (${escapeHtml(feedback.user?.email || '-')})</p>
+          <p>用户：${escapeHtml(feedback.user?.nickname || '-')} (${escapeHtml(maskEmail(feedback.user?.email || '-'))})</p>
           <p>关联商品：${feedback.relatedItem ? `#${feedback.relatedItem.id} ${escapeHtml(feedback.relatedItem.title || '-')}` : '-'}</p>
           <p>关联订单：${feedback.relatedOrder ? `#${feedback.relatedOrder.id} ${feedback.relatedOrder.status}` : '-'}</p>
         </div>
@@ -1488,14 +2408,35 @@ async function openFeedbackDetail(feedbackId) {
 }
 
 async function updateFeedbackStatus(feedbackId, currentStatus, currentPriority) {
-  const status = prompt(
+  const status = await promptText(
     '输入新状态（pending/in_progress/need_more_info/confirmed/duplicate/invalid/fixed/accepted/closed）',
-    currentStatus || 'pending'
+    currentStatus || 'pending',
+    {
+      title: '更新反馈状态',
+      label: '新状态',
+      confirmText: '继续',
+      confirmVariant: 'dark',
+    }
   );
   if (status === null) return;
-  const priority = prompt('输入优先级（low/medium/high/critical）', currentPriority || 'medium');
+  const priority = await promptText('输入优先级（low/medium/high/critical）', currentPriority || 'medium', {
+    title: '更新反馈状态',
+    label: '优先级',
+    confirmText: '继续',
+    confirmVariant: 'dark',
+  });
   if (priority === null) return;
-  const adminNote = prompt('管理员备注（可选）', '') || '';
+  const reason = await promptReason('更新反馈状态原因', true);
+  if (reason === null) return;
+  const adminNote = (await promptText('管理员备注（可选）', '', {
+    title: '更新反馈状态',
+    label: '管理员备注',
+    multiline: true,
+    required: false,
+    confirmText: '继续',
+    confirmVariant: 'dark',
+  })) || '';
+  if (!(await confirmCriticalAction(`更新反馈状态为 ${status.trim()}`, reason))) return;
 
   try {
     await apiRequest(`/admin/feedbacks/${feedbackId}`, {
@@ -1504,6 +2445,7 @@ async function updateFeedbackStatus(feedbackId, currentStatus, currentPriority) 
         status: status.trim(),
         priority: priority.trim(),
         adminNote: adminNote.trim(),
+        reason,
       }),
     });
     await loadFeedbacks(state.currentPage.feedbacks);
@@ -1513,16 +2455,25 @@ async function updateFeedbackStatus(feedbackId, currentStatus, currentPriority) 
 }
 
 async function replyFeedback(feedbackId) {
-  const adminReply = prompt('请输入回复内容（会显示给用户）:') || '';
+  const adminReply = (await promptText('请输入回复内容（会显示给用户）:', '', {
+    title: '回复反馈',
+    label: '回复内容',
+    multiline: true,
+    confirmText: '继续',
+    confirmVariant: 'dark',
+  })) || '';
   if (!adminReply.trim()) {
     showError('回复内容不能为空');
     return;
   }
+  const reason = await promptReason('管理员回复原因', true);
+  if (reason === null) return;
+  if (!(await confirmCriticalAction('回复反馈', reason))) return;
 
   try {
     await apiRequest(`/admin/feedbacks/${feedbackId}`, {
       method: 'PATCH',
-      body: JSON.stringify({ adminReply: adminReply.trim() }),
+      body: JSON.stringify({ adminReply: adminReply.trim(), reason }),
     });
     await loadFeedbacks(state.currentPage.feedbacks);
   } catch (error) {
@@ -1531,15 +2482,36 @@ async function replyFeedback(feedbackId) {
 }
 
 async function rewardFeedback(feedbackId) {
-  const rewardType = (prompt(
+  const rewardType = ((await promptText(
     '奖励类型（PIN_CREDIT / COUPON / MEMBERSHIP_DAYS / POINTS / BALANCE / NONE）',
-    'NONE'
-  ) || '').trim().toUpperCase();
+    'NONE',
+    {
+      title: '发放反馈奖励',
+      label: '奖励类型',
+      confirmText: '继续',
+      confirmVariant: 'dark',
+    }
+  )) || '').toUpperCase();
   if (!rewardType) return;
 
-  const rewardValue = (prompt('奖励值（例如 PIN_24H / 7 / 100 / 10.00，可选）', '') || '').trim();
-  const note = (prompt('奖励备注（可选）', '') || '').trim();
-  if (!confirm(`确认发放奖励？\n反馈ID: ${feedbackId}\n奖励类型: ${rewardType}\n奖励值: ${rewardValue || '-'}`)) return;
+  const rewardValue = (await promptText('奖励值（例如 PIN_24H / 7 / 100 / 10.00，可选）', '', {
+    title: '发放反馈奖励',
+    label: '奖励值',
+    required: false,
+    confirmText: '继续',
+    confirmVariant: 'dark',
+  })) || '';
+  const note = (await promptText('奖励备注（可选）', '', {
+    title: '发放反馈奖励',
+    label: '奖励备注',
+    multiline: true,
+    required: false,
+    confirmText: '继续',
+    confirmVariant: 'dark',
+  })) || '';
+  const reason = await promptReason('发放反馈奖励原因', true);
+  if (reason === null) return;
+  if (!(await confirmCriticalAction(`发放反馈奖励：${rewardType}`, reason))) return;
 
   try {
     await apiRequest(`/admin/feedbacks/${feedbackId}/rewards`, {
@@ -1549,6 +2521,7 @@ async function rewardFeedback(feedbackId) {
         rewardValue,
         note,
         confirm: true,
+        reason,
       }),
     });
     showSuccess('奖励处理成功');
@@ -1630,7 +2603,7 @@ async function loadItems(page = 1) {
                   ? `<img src="${escapeHtml(thumb)}" class="w-full h-36 object-cover rounded mb-3" />`
                   : '<div class="h-36 bg-gray-100 rounded mb-3 flex items-center justify-center text-gray-400">无图片</div>'
               }
-              <p class="text-sm text-gray-700 mb-1">卖家：${escapeHtml(item.seller?.nickname || '未知')} (${escapeHtml(item.seller?.email || '-')})</p>
+              <p class="text-sm text-gray-700 mb-1">卖家：${escapeHtml(item.seller?.nickname || '未知')} (${escapeHtml(maskEmail(item.seller?.email || '-'))})</p>
               <p class="text-sm text-gray-700 mb-1">价格：${formatMoney(item.expectedPrice)} · 浏览 ${item.viewCount || 0} · 收藏 ${item.favoritesCount || 0}</p>
               <p class="text-sm text-gray-700 mb-3">置顶：${item.isPinned ? '是' : '否'} · 置顶到期：${formatDateTime(item.pinnedAt)} · 举报 ${item.reportCount || 0}</p>
               <div class="flex gap-2 flex-wrap">
@@ -1680,15 +2653,18 @@ async function batchUpdateItemsStatus(status) {
     return;
   }
 
+  const previewItems = collectBatchPreview('.item-checkbox', ['h4.font-semibold'], 5);
+  if (!(await confirmBatchPreview(`批量更新商品状态为 ${status}`, itemIds.length, previewItems, '商品管理'))) return;
+
   let reason = '';
   if (status === 'WITHDRAWN') {
-    reason = promptReason('批量下架商品', true) || '';
+    reason = (await promptReason('批量下架商品', true)) || '';
     if (!reason) return;
   } else {
-    reason = promptReason(`批量改状态为 ${status}（可选备注）`, false) ?? '';
+    reason = (await promptReason(`批量改状态为 ${status}（可选备注）`, false)) ?? '';
   }
 
-  if (!confirmCriticalAction(`批量更新商品状态为 ${status}（${itemIds.length}条）`, reason)) return;
+  if (!(await confirmCriticalAction(`批量更新商品状态为 ${status}（${itemIds.length}条）`, reason))) return;
 
   try {
     await apiRequest('/admin/items/batch-status', {
@@ -1704,9 +2680,9 @@ async function batchUpdateItemsStatus(status) {
 }
 
 async function deleteItem(itemId) {
-  const reason = promptReason('下架商品', true);
+  const reason = await promptReason('下架商品', true);
   if (reason === null) return;
-  if (!confirmCriticalAction('下架商品', reason)) return;
+  if (!(await confirmCriticalAction('下架商品', reason))) return;
 
   try {
     await apiRequest(`/admin/items/${itemId}`, {
@@ -1722,9 +2698,11 @@ async function deleteItem(itemId) {
 
 async function setItemStatus(itemId, status) {
   const needsReason = ['WITHDRAWN', 'REJECTED', 'REMOVED_BY_ADMIN', 'DELETED', 'PAUSED'].includes(status);
-  const reason = needsReason ? promptReason(`将商品状态改为 ${status}`, true) : promptReason(`将商品状态改为 ${status}（可选备注）`, false);
+  const reason = needsReason
+    ? await promptReason(`将商品状态改为 ${status}`, true)
+    : await promptReason(`将商品状态改为 ${status}（可选备注）`, false);
   if (reason === null) return;
-  if (!confirmCriticalAction(`更新商品状态为 ${status}`, reason || '无')) return;
+  if (!(await confirmCriticalAction(`更新商品状态为 ${status}`, reason || '无'))) return;
 
   try {
     await apiRequest(`/admin/items/${itemId}/status`, {
@@ -1738,9 +2716,9 @@ async function setItemStatus(itemId, status) {
 }
 
 async function adjustItemPin(itemId, action) {
-  const reason = promptReason(`执行 ${action}`, true);
+  const reason = await promptReason(`执行 ${action}`, true);
   if (reason === null) return;
-  if (!confirmCriticalAction(`调整商品置顶：${action}`, reason)) return;
+  if (!(await confirmCriticalAction(`调整商品置顶：${action}`, reason))) return;
 
   try {
     await apiRequest(`/admin/items/${itemId}/pin-adjust`, {
@@ -1769,7 +2747,7 @@ async function openItemDetail(itemId) {
 
     const logRows = adminLogs
       .slice(0, 20)
-      .map((log) => `<li>${formatDateTime(log.createdAt)} · ${escapeHtml(log.action)} · ${escapeHtml(log.admin?.nickname || log.admin?.email || '-')}</li>`)
+      .map((log) => `<li>${formatDateTime(log.createdAt)} · ${escapeHtml(log.action)} · ${escapeHtml(log.admin?.nickname || maskEmail(log.admin?.email) || '-')}</li>`)
       .join('');
 
     const html = `
@@ -1778,7 +2756,7 @@ async function openItemDetail(itemId) {
         <div><span class="font-semibold">标题：</span>${escapeHtml(item.title)}</div>
         <div><span class="font-semibold">分类：</span>${escapeHtml(item.category || '-')}</div>
         <div><span class="font-semibold">状态：</span>${item.status}</div>
-        <div><span class="font-semibold">卖家：</span>${escapeHtml(item.seller?.nickname || '-')} (${escapeHtml(item.seller?.email || '-')})</div>
+        <div><span class="font-semibold">卖家：</span>${escapeHtml(item.seller?.nickname || '-')} (${escapeHtml(maskEmail(item.seller?.email || '-'))})</div>
         <div><span class="font-semibold">城市：</span>${escapeHtml(item.pickupCity || '-')}</div>
         <div><span class="font-semibold">价格：</span>${formatMoney(item.expectedPrice)}</div>
         <div><span class="font-semibold">置顶：</span>${item.isPinned ? '是' : '否'}，到期：${formatDateTime(item.pinnedAt)}</div>
@@ -1859,19 +2837,13 @@ async function loadOrders(page = 1) {
                 }">${order.status}</span>
               </div>
               <p class="text-sm text-gray-700">商品：${escapeHtml(order.item?.title || '-')}</p>
-              <p class="text-sm text-gray-700">买家：${escapeHtml(order.buyer?.nickname || '-')}（${escapeHtml(
-            order.buyer?.email || '-'
-          )}）</p>
-              <p class="text-sm text-gray-700">卖家：${escapeHtml(order.seller?.nickname || '-')}（${escapeHtml(
-            order.seller?.email || '-'
-          )}）</p>
+              <p class="text-sm text-gray-700">买家：${escapeHtml(order.buyer?.nickname || '-')}（${escapeHtml(maskEmail(order.buyer?.email || '-'))}）</p>
+              <p class="text-sm text-gray-700">卖家：${escapeHtml(order.seller?.nickname || '-')}（${escapeHtml(maskEmail(order.seller?.email || '-'))}）</p>
               <p class="text-sm text-gray-700 mb-1">金额：${formatMoney(order.amount)} · 时间：${formatDateTime(order.createdAt)}</p>
               <p class="text-sm text-gray-700 mb-3">纠纷：${order.hasDispute ? '是' : '否'} · 交易流水：${order.transactionCount || 0}</p>
               <div class="flex flex-wrap gap-2">
                 <button onclick="openOrderDetail(${order.id})" class="btn-gray">查看详情</button>
-                <button onclick="setOrderStatus(${order.id}, 'COMPLETED')" class="btn-gray">标记完成</button>
-                <button onclick="setOrderStatus(${order.id}, 'CANCELED')" class="btn-red">标记取消</button>
-                <button onclick="setOrderStatus(${order.id}, 'DISPUTED')" class="btn-red">标记纠纷</button>
+                ${renderOrderActionButtons(order)}
               </div>
             </div>
           `
@@ -1904,8 +2876,8 @@ async function openOrderDetail(orderId) {
         <div><span class="font-semibold">状态：</span>${order.status}</div>
         <div><span class="font-semibold">金额：</span>${formatMoney(order.amount)}</div>
         <div><span class="font-semibold">支付方式：</span>${escapeHtml(order.payMethod || '-')}</div>
-        <div><span class="font-semibold">买家：</span>${escapeHtml(order.buyer?.nickname || '-')} (${escapeHtml(order.buyer?.email || '-')})</div>
-        <div><span class="font-semibold">卖家：</span>${escapeHtml(order.seller?.nickname || '-')} (${escapeHtml(order.seller?.email || '-')})</div>
+        <div><span class="font-semibold">买家：</span>${escapeHtml(order.buyer?.nickname || '-')} (${escapeHtml(maskEmail(order.buyer?.email || '-'))})</div>
+        <div><span class="font-semibold">卖家：</span>${escapeHtml(order.seller?.nickname || '-')} (${escapeHtml(maskEmail(order.seller?.email || '-'))})</div>
         <div><span class="font-semibold">商品：</span>${escapeHtml(order.item?.title || '-')}</div>
         <div><span class="font-semibold">创建时间：</span>${formatDateTime(order.createdAt)}</div>
         <hr />
@@ -1927,9 +2899,9 @@ async function openOrderDetail(orderId) {
 }
 
 async function setOrderStatus(orderId, status) {
-  const reason = promptReason(`更新订单 #${orderId} 状态为 ${status}`, true);
+  const reason = await promptReason(`更新订单 #${orderId} 状态为 ${status}`, true);
   if (reason === null) return;
-  if (!confirmCriticalAction(`更新订单状态为 ${status}`, reason)) return;
+  if (!(await confirmCriticalAction(`更新订单状态为 ${status}`, reason))) return;
 
   try {
     await apiRequest(`/admin/orders/${orderId}/status`, {
@@ -1985,9 +2957,7 @@ async function loadTransactions(page = 1) {
           )}</span></td>
               <td class="td">${tx.type}</td>
               <td class="td">${formatMoney(tx.amount)}</td>
-              <td class="td">${escapeHtml(tx.user?.nickname || '-')}<br /><span class="text-xs text-gray-500">${escapeHtml(
-            tx.user?.email || '-'
-          )}</span></td>
+              <td class="td">${escapeHtml(tx.user?.nickname || '-')}<br /><span class="text-xs text-gray-500">${escapeHtml(maskEmail(tx.user?.email || '-'))}</span></td>
               <td class="td">${tx.order ? `#${tx.order.id} (${tx.order.status})` : '-'}</td>
               <td class="td">${escapeHtml(tx.description || '-')}</td>
               <td class="td">${formatDateTime(tx.createdAt)}</td>
@@ -2088,7 +3058,7 @@ async function loadDisputes(page = 1) {
         (tx) => `
           <div class="card">
             <p class="font-semibold">退款 #${tx.id} · ${formatMoney(tx.amount)}</p>
-            <p class="text-sm text-gray-700">用户：${escapeHtml(tx.user?.nickname || '-')} (${escapeHtml(tx.user?.email || '-')})</p>
+            <p class="text-sm text-gray-700">用户：${escapeHtml(tx.user?.nickname || '-')} (${escapeHtml(maskEmail(tx.user?.email || '-'))})</p>
             <p class="text-sm text-gray-700">订单：${tx.order ? `#${tx.order.id} (${tx.order.status})` : '-'}</p>
             <p class="text-xs text-gray-500">${formatDateTime(tx.createdAt)}</p>
           </div>
@@ -2105,10 +3075,33 @@ async function loadDisputes(page = 1) {
 }
 
 async function assignDisputeOrder(orderId) {
-  const assigneeRaw = prompt('输入要指派的管理员ID（留空=自己）：') || '';
-  const priorityRaw = (prompt('输入优先级（LOW/MEDIUM/HIGH）', 'MEDIUM') || 'MEDIUM').toUpperCase();
-  const dueAtRaw = prompt('输入SLA截止时间（可选，例如 2026-05-01 18:00）：') || '';
-  const note = prompt('输入备注（可选）：') || '';
+  const assigneeRaw = (await promptText('输入要指派的管理员ID（留空=自己）：', '', {
+    title: '指派纠纷订单',
+    label: '管理员ID',
+    confirmText: '继续',
+    confirmVariant: 'dark',
+  })) || '';
+  const priorityRaw = ((await promptText('输入优先级（LOW/MEDIUM/HIGH）', 'MEDIUM', {
+    title: '指派纠纷订单',
+    label: '优先级',
+    confirmText: '继续',
+    confirmVariant: 'dark',
+  })) || 'MEDIUM').toUpperCase();
+  const dueAtRaw = (await promptText('输入SLA截止时间（可选，例如 2026-05-01 18:00）：', '', {
+    title: '指派纠纷订单',
+    label: 'SLA 截止时间',
+    required: false,
+    confirmText: '继续',
+    confirmVariant: 'dark',
+  })) || '';
+  const note = (await promptText('输入备注（可选）：', '', {
+    title: '指派纠纷订单',
+    label: '备注',
+    multiline: true,
+    required: false,
+    confirmText: '继续',
+    confirmVariant: 'dark',
+  })) || '';
 
   let dueAt;
   if (dueAtRaw.trim()) {
@@ -2139,9 +3132,9 @@ async function assignDisputeOrder(orderId) {
 
 async function resolveDisputeOrder(orderId, action) {
   const actionLabel = action === 'MARK_COMPLETED' ? '将取消订单改为已完成' : '保持订单为已取消';
-  const reason = promptReason(actionLabel, true);
+  const reason = await promptReason(actionLabel, true);
   if (reason === null) return;
-  if (!confirmCriticalAction(actionLabel, reason)) return;
+  if (!(await confirmCriticalAction(actionLabel, reason))) return;
 
   try {
     await apiRequest(`/admin/disputes/orders/${orderId}/resolve`, {
@@ -2263,11 +3256,17 @@ function getMovingNextActions(service, meta) {
   const isPlatform = isPlatformMovingServiceRecord(service, meta);
 
   if (!isPlatform) {
-    return ['CONFIRMED', 'IN_PROGRESS', 'COMPLETED', 'CANCELED'];
+    if (status === 'PENDING') return ['CONFIRMED', 'CANCELED'];
+    if (status === 'CONFIRMED') return ['IN_PROGRESS', 'CANCELED'];
+    if (status === 'IN_PROGRESS') return ['COMPLETED', 'CANCELED'];
+    return [];
   }
 
-  if (status === 'WAITING_PLATFORM_DELIVERY_QUOTE' || status === 'DELIVERY_QUOTE_CONFIRMED') {
+  if (status === 'WAITING_PLATFORM_DELIVERY_QUOTE') {
     return ['DELIVERY_QUOTE_CONFIRMED', 'CANCELED'];
+  }
+  if (status === 'DELIVERY_QUOTE_CONFIRMED') {
+    return [];
   }
   if (status === 'BUYER_PAID_WAITING_DRIVER') {
     return ['DRIVER_ASSIGNED', 'CANCELED'];
@@ -2283,6 +3282,9 @@ function getMovingNextActions(service, meta) {
   }
   if (status === 'DELIVERED_WAITING_BUYER_INSPECTION') {
     return [];
+  }
+  if (status === 'BUYER_CONFIRMED_RECEIPT') {
+    return ['COMPLETED'];
   }
   return [];
 }
@@ -2423,7 +3425,7 @@ function renderMovingWorkflowPanel(preferredStatus = '') {
         <p class="text-gray-700 mt-1">${escapeHtml(service.fromAddress || '-')} → ${escapeHtml(service.toAddress || '-')}</p>
       </div>
       <div>
-        <p class="text-gray-700">联系人：${escapeHtml(service.contactName || '-')} · ${escapeHtml(service.contactPhone || '-')}</p>
+        <p class="text-gray-700">联系人：${escapeHtml(service.contactName || '-')} · ${escapeHtml(maskPhone(service.contactPhone || '-'))}</p>
         <p class="text-gray-500 mt-1">配送费：${formatMoney(meta?.deliveryFee || service.estimatedCost || 0)}（${deliveryPayerLabel(
     meta?.deliveryFeePayer
   )}支付）</p>
@@ -2501,7 +3503,11 @@ async function submitMovingWorkflow() {
     return;
   }
 
-  const reason = getInputValue('movingWorkflowReason');
+  const reason = String(getInputValue('movingWorkflowReason') || '').trim();
+  if (reason.length < 3) {
+    setMovingWorkflowMessage('error', '请填写至少 3 个字符的处理原因。');
+    return;
+  }
   const moversName = getInputValue('movingWorkflowMoverName');
   const moversPhone = getInputValue('movingWorkflowMoverPhone');
   const movingDate = getInputValue('movingWorkflowMovingDate');
@@ -2536,6 +3542,10 @@ async function submitMovingWorkflow() {
     return;
   }
 
+  if (!(await confirmCriticalAction(`提交服务 #${serviceId} 流程更新：${formatMovingStatusLabel(status)}`, reason))) {
+    return;
+  }
+
   const submitBtn = document.getElementById('movingWorkflowSubmitBtn');
   state.movingWorkflowSubmitting = true;
   if (submitBtn) {
@@ -2565,57 +3575,29 @@ async function submitMovingWorkflow() {
 }
 
 function renderMovingActionButtons(service, meta) {
-  const status = String(service.status || '').toUpperCase();
-  const isPlatform = isPlatformMovingServiceRecord(service, meta);
   const serviceId = Number(service.id);
   const defaultQuote = Number(meta?.deliveryFee || service.estimatedCost || 0);
+  const actions = getMovingNextActions(service, meta);
 
-  if (!isPlatform) {
-    return `
-      <button onclick="openMovingWorkflow(${serviceId}, 'CONFIRMED', ${defaultQuote})" class="btn-gray">确认</button>
-      <button onclick="openMovingWorkflow(${serviceId}, 'IN_PROGRESS')" class="btn-gray">进行中</button>
-      <button onclick="openMovingWorkflow(${serviceId}, 'COMPLETED')" class="btn-red">完成</button>
-      <button onclick="openMovingWorkflow(${serviceId}, 'CANCELED')" class="btn-gray">取消</button>
-    `;
+  if (!actions.length) {
+    const status = String(service.status || '').toUpperCase();
+    if (status === 'DELIVERED_WAITING_BUYER_INSPECTION') {
+      return `<span class="text-xs text-indigo-600">等待买家在 App 聊天页验货并确认收货</span>`;
+    }
+    if (status === 'DISPUTED') {
+      return `<span class="text-xs text-red-600">纠纷处理中，请在纠纷处理页操作</span>`;
+    }
+    return `<span class="text-xs text-gray-500">当前状态无需后台操作</span>`;
   }
 
-  if (status === 'WAITING_PLATFORM_DELIVERY_QUOTE' || status === 'DELIVERY_QUOTE_CONFIRMED') {
-    return `
-      <button onclick="openMovingWorkflow(${serviceId}, 'DELIVERY_QUOTE_CONFIRMED', ${defaultQuote})" class="btn-gray">确认报价</button>
-      <button onclick="openMovingWorkflow(${serviceId}, 'CANCELED')" class="btn-gray">取消</button>
-    `;
-  }
-  if (status === 'BUYER_PAID_WAITING_DRIVER') {
-    return `
-      <button onclick="openMovingWorkflow(${serviceId}, 'DRIVER_ASSIGNED')" class="btn-gray">分配配送员</button>
-      <button onclick="openMovingWorkflow(${serviceId}, 'CANCELED')" class="btn-gray">取消</button>
-    `;
-  }
-  if (status === 'DRIVER_ASSIGNED') {
-    return `
-      <button onclick="openMovingWorkflow(${serviceId}, 'PICKED_UP')" class="btn-gray">标记已取货</button>
-      <button onclick="openMovingWorkflow(${serviceId}, 'CANCELED')" class="btn-gray">取消</button>
-    `;
-  }
-  if (status === 'PICKED_UP') {
-    return `
-      <button onclick="openMovingWorkflow(${serviceId}, 'IN_TRANSIT')" class="btn-gray">配送中</button>
-      <button onclick="openMovingWorkflow(${serviceId}, 'CANCELED')" class="btn-gray">取消</button>
-    `;
-  }
-  if (status === 'IN_TRANSIT') {
-    return `
-      <button onclick="openMovingWorkflow(${serviceId}, 'DELIVERED_WAITING_BUYER_INSPECTION')" class="btn-gray">标记送达</button>
-      <button onclick="openMovingWorkflow(${serviceId}, 'CANCELED')" class="btn-gray">取消</button>
-    `;
-  }
-  if (status === 'DELIVERED_WAITING_BUYER_INSPECTION') {
-    return `<span class="text-xs text-indigo-600">等待买家在 App 聊天页验货并确认收货</span>`;
-  }
-  if (status === 'DISPUTED') {
-    return `<span class="text-xs text-red-600">纠纷处理中，请在纠纷处理页操作</span>`;
-  }
-  return `<span class="text-xs text-gray-500">当前状态无需后台操作</span>`;
+  return actions
+    .map(
+      (action) =>
+        `<button onclick="openMovingWorkflow(${serviceId}, '${action}', ${defaultQuote})" class="btn-gray">${escapeHtml(
+          movingStatusActionLabel(action)
+        )}</button>`
+    )
+    .join('');
 }
 
 function parsePhotoUrlInput(rawText) {
@@ -2729,9 +3711,7 @@ function renderMovingServiceCard(svc) {
         </div>
         <span class="px-2 py-1 rounded text-xs ${movingStatusBadgeClass(svc.status)}">${escapeHtml(statusLabel)}</span>
       </div>
-      <p class="text-sm text-gray-700 mb-3">费用：${formatMoney(svc.estimatedCost)} · 联系人：${escapeHtml(svc.contactName)} ${escapeHtml(
-    svc.contactPhone
-  )}</p>
+      <p class="text-sm text-gray-700 mb-3">费用：${formatMoney(svc.estimatedCost)} · 联系人：${escapeHtml(svc.contactName)} ${escapeHtml(maskPhone(svc.contactPhone || '-'))}</p>
       <div class="flex gap-2 flex-wrap">
         <button onclick="openMovingWorkflow(${svc.id}, '', ${Number(meta?.deliveryFee || svc.estimatedCost || 0)})" class="btn-dark">进入流程</button>
         ${actionButtonsHtml}
@@ -2866,7 +3846,12 @@ async function batchUpdateMovingStatus(status) {
     return;
   }
 
-  const reason = getInputValue('movingWorkflowReason') || `批量更新为 ${status}`;
+  const previewItems = collectBatchPreview('.moving-checkbox', ['p.font-semibold'], 5);
+  if (!(await confirmBatchPreview(`批量更新配送/搬运状态为 ${status}`, ids.length, previewItems, '线下服务 - 配送/搬运'))) return;
+
+  const reason = await promptReason(`批量更新配送/搬运状态为 ${status}`, true);
+  if (reason === null) return;
+  if (!(await confirmCriticalAction(`批量更新配送/搬运状态为 ${status}（${ids.length}条）`, reason))) return;
 
   try {
     await apiRequest('/admin/offline-services/moving/batch-status', {
@@ -2934,9 +3919,7 @@ async function loadStorageOrders(page = 1) {
                 }">${order.status}</span>
               </div>
               <div class="flex gap-2 flex-wrap">
-                <button onclick="updateStorageStatus(${order.id}, 'ACTIVE')" class="btn-gray">激活</button>
-                <button onclick="updateStorageStatus(${order.id}, 'COMPLETED')" class="btn-red">完成</button>
-                <button onclick="updateStorageStatus(${order.id}, 'EXPIRED')" class="btn-gray">过期</button>
+                ${renderStorageActionButtons(order)}
               </div>
             </div>
           `;
@@ -2978,8 +3961,12 @@ async function batchUpdateStorageStatus(status) {
     return;
   }
 
-  const reason = promptReason(`批量更新仓储状态为 ${status}（可选备注）`, false) ?? '';
-  if (!confirmCriticalAction(`批量更新仓储状态为 ${status}（${ids.length}条）`, reason)) return;
+  const previewItems = collectBatchPreview('.storage-checkbox', ['p.font-semibold'], 5);
+  if (!(await confirmBatchPreview(`批量更新仓储状态为 ${status}`, ids.length, previewItems, '线下服务 - 仓储订单'))) return;
+
+  const reason = await promptReason(`批量更新仓储状态为 ${status}`, true);
+  if (reason === null) return;
+  if (!(await confirmCriticalAction(`批量更新仓储状态为 ${status}（${ids.length}条）`, reason))) return;
 
   try {
     await apiRequest('/admin/offline-services/storage/batch-status', {
@@ -2995,8 +3982,9 @@ async function batchUpdateStorageStatus(status) {
 }
 
 async function updateStorageStatus(orderId, status) {
-  const reason = promptReason(`更新仓储单 #${orderId} 状态为 ${status}（可选备注）`, false) ?? '';
-  if (!confirmCriticalAction(`更新仓储状态为 ${status}`, reason)) return;
+  const reason = await promptReason(`更新仓储单 #${orderId} 状态为 ${status}`, true);
+  if (reason === null) return;
+  if (!(await confirmCriticalAction(`更新仓储状态为 ${status}`, reason))) return;
 
   try {
     await apiRequest(`/admin/offline-services/storage/${orderId}/status`, {
@@ -3036,7 +4024,7 @@ async function loadRecycleConsign() {
         (order) => `
           <div class="card">
             <p class="font-semibold">仓储单 #${order.id}</p>
-            <p class="text-sm text-gray-700">用户：${escapeHtml(order.user?.nickname || '-')} (${escapeHtml(order.user?.email || '-')})</p>
+            <p class="text-sm text-gray-700">用户：${escapeHtml(order.user?.nickname || '-')} (${escapeHtml(maskEmail(order.user?.email || '-'))})</p>
           </div>
         `
       )
@@ -3063,8 +4051,8 @@ async function loadRecycleConsign() {
 }
 
 async function updateRecycleConsignItem(itemId, action) {
-  const reason = promptReason(`执行 ${action}（可选备注）`, false) ?? '';
-  if (!confirmCriticalAction(`执行 ${action}`, reason)) return;
+  const reason = (await promptReason(`执行 ${action}（可选备注）`, false)) ?? '';
+  if (!(await confirmCriticalAction(`执行 ${action}`, reason))) return;
 
   try {
     await apiRequest(`/admin/offline-services/recycle-consign/items/${itemId}`, {
@@ -3113,13 +4101,11 @@ async function loadLogs(page = 1) {
       'logsList',
       data.logs
         .map((log) => {
-          const detailText = log.details ? escapeHtml(JSON.stringify(log.details)) : '-';
+          const detailText = log.details ? renderLogDetailsSummary(log.details) : '<span class="text-gray-400">-</span>';
           return `
             <tr>
               <td class="td">${formatDateTime(log.createdAt)}</td>
-              <td class="td">${escapeHtml(log.admin?.nickname || '-')}<br /><span class="text-xs text-gray-500">${escapeHtml(
-            log.admin?.email || '-'
-          )}</span></td>
+              <td class="td">${escapeHtml(log.admin?.nickname || '-')}<br /><span class="text-xs text-gray-500">${escapeHtml(maskEmail(log.admin?.email || '-'))}</span></td>
               <td class="td">${escapeHtml(log.action)}</td>
               <td class="td">${escapeHtml(log.targetType || '-')} ${log.targetId ? `#${log.targetId}` : ''}</td>
               <td class="td text-xs break-all">${detailText}</td>
@@ -3188,7 +4174,7 @@ async function loadPinOrders(page = 1) {
                 <p class="font-semibold">#${order.id} · ${escapeHtml(order.packageName || order.packageCode)}</p>
                 ${formatStatusBadge(order.status, statusType)}
               </div>
-              <p class="text-xs text-gray-600">用户：${escapeHtml(order.user?.nickname || order.user?.email || `#${order.user?.id || '-'}`)}</p>
+              <p class="text-xs text-gray-600">用户：${escapeHtml(order.user?.nickname || maskEmail(order.user?.email) || `#${order.user?.id || '-'}`)}</p>
               <p class="text-xs text-gray-600">商品：${escapeHtml(order.item?.title || `#${order.item?.id || '-'}`)}</p>
               <p class="text-xs text-gray-600">金额：${formatMoney(order.amount)} · 时长：${order.durationHours || 0}h</p>
               <p class="text-xs text-gray-600">创建：${formatDateTime(order.createdAt)} · 到期：${formatDateTime(order.expectedExpiresAt)}</p>
@@ -3211,9 +4197,9 @@ async function loadPinOrders(page = 1) {
 }
 
 async function updatePinOrder(orderId, action) {
-  const reason = promptReason(`置顶订单操作：${action}`, true);
+  const reason = await promptReason(`置顶订单操作：${action}`, true);
   if (reason === null) return;
-  if (!confirmCriticalAction(`置顶订单执行 ${action}`, reason)) return;
+  if (!(await confirmCriticalAction(`置顶订单执行 ${action}`, reason))) return;
 
   try {
     await apiRequest(`/admin/commercialization/pin-orders/${orderId}`, {
@@ -3255,7 +4241,7 @@ async function loadMemberships(page = 1) {
               <p class="font-semibold">订单 #${item.id} · 用户 #${item.user?.id || '-'}</p>
               ${formatStatusBadge(item.isActive ? 'active' : 'inactive', item.isActive ? 'success' : 'default')}
             </div>
-            <p class="text-xs text-gray-600">用户：${escapeHtml(item.user?.nickname || item.user?.email || '-')}</p>
+            <p class="text-xs text-gray-600">用户：${escapeHtml(item.user?.nickname || maskEmail(item.user?.email) || '-')}</p>
             <p class="text-xs text-gray-600">来源：${escapeHtml(item.source || '-')} · 金额：${formatMoney(item.amount)}</p>
             <p class="text-xs text-gray-600">开始：${formatDateTime(item.startAt)} · 到期：${formatDateTime(item.expiresAt)}</p>
           </div>
@@ -3271,10 +4257,20 @@ async function loadMemberships(page = 1) {
 }
 
 async function openGrantMembershipPrompt() {
-  const userId = Number(prompt('输入用户ID：') || 0);
+  const userId = Number((await promptText('输入用户ID：', '', {
+    title: '发放会员',
+    label: '用户ID',
+    confirmText: '继续',
+    confirmVariant: 'dark',
+  })) || 0);
   if (!userId) return;
-  const mode = (prompt('发放模式（CONFIRM/PENDING）', 'CONFIRM') || 'CONFIRM').trim().toUpperCase();
-  const reason = promptReason('发放会员原因', true);
+  const mode = ((await promptText('发放模式（CONFIRM/PENDING）', 'CONFIRM', {
+    title: '发放会员',
+    label: '发放模式',
+    confirmText: '继续',
+    confirmVariant: 'dark',
+  })) || 'CONFIRM').toUpperCase();
+  const reason = await promptReason('发放会员原因', true);
   if (reason === null) return;
 
   try {
@@ -3313,7 +4309,7 @@ async function loadRewardRecords(page = 1) {
               <p class="text-xs text-gray-500">${formatDateTime(item.createdAt)}</p>
             </div>
             <p class="text-xs text-gray-600">反馈：#${item.feedbackId} · 用户：#${item.userId || '-'}</p>
-            <p class="text-xs text-gray-600">奖励值：${escapeHtml(item.rewardValue || '-')} · 管理员：${escapeHtml(item.admin?.nickname || item.admin?.email || '-')}</p>
+            <p class="text-xs text-gray-600">奖励值：${escapeHtml(item.rewardValue || '-')} · 管理员：${escapeHtml(item.admin?.nickname || maskEmail(item.admin?.email) || '-')}</p>
             <p class="text-xs text-gray-600">备注：${escapeHtml(item.note || '-')}</p>
           </div>
         `
@@ -3327,12 +4323,28 @@ async function loadRewardRecords(page = 1) {
 }
 
 async function openGrantRewardPrompt() {
-  const userId = Number(prompt('输入用户ID：') || 0);
+  const userId = Number((await promptText('输入用户ID：', '', {
+    title: '发放奖励',
+    label: '用户ID',
+    confirmText: '继续',
+    confirmVariant: 'dark',
+  })) || 0);
   if (!userId) return;
-  const rewardType = (prompt('奖励类型（PIN_CREDIT / MEMBERSHIP_30D / POINTS / BALANCE）', 'PIN_CREDIT') || '').trim().toUpperCase();
+  const rewardType = ((await promptText('奖励类型（PIN_CREDIT / MEMBERSHIP_30D / POINTS / BALANCE）', 'PIN_CREDIT', {
+    title: '发放奖励',
+    label: '奖励类型',
+    confirmText: '继续',
+    confirmVariant: 'dark',
+  })) || '').toUpperCase();
   if (!rewardType) return;
-  const rewardValue = (prompt('奖励值（例如 PIN_24H / 100 / 10.00）', '') || '').trim();
-  const reason = promptReason('奖励发放原因', true);
+  const rewardValue = (await promptText('奖励值（例如 PIN_24H / 100 / 10.00）', '', {
+    title: '发放奖励',
+    label: '奖励值',
+    required: false,
+    confirmText: '继续',
+    confirmVariant: 'dark',
+  })) || '';
+  const reason = await promptReason('奖励发放原因', true);
   if (reason === null) return;
 
   try {
@@ -3386,7 +4398,7 @@ async function loadFeatureFlags() {
 }
 
 async function saveFeatureFlags() {
-  const reason = promptReason('保存功能开关', true);
+  const reason = await promptReason('保存功能开关', true);
   if (reason === null) return;
   const getCheckbox = (id) => Boolean(document.getElementById(id)?.checked);
   const getNumber = (id, fallback = 0) => {
@@ -3412,7 +4424,7 @@ async function saveFeatureFlags() {
     feedbackDailyLimit: getNumber('flagFeedbackDailyLimit', 5),
   };
 
-  if (!confirmCriticalAction('保存系统配置', reason)) return;
+  if (!(await confirmCriticalAction('保存系统配置', reason))) return;
 
   try {
     await apiRequest('/admin/feature-flags', {
