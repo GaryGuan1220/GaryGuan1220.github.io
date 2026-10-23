@@ -1,10 +1,19 @@
 // CReuse 管理后台前端逻辑（P0/P1 增强版）
-const API_BASE_URL = 'https://campus-reuse-backend-production.up.railway.app';
-// const API_BASE_URL = 'http://localhost:8080';
+const API_BASE_URL = (() => {
+  const PROD_API_BASE_URL = 'https://campus-reuse-backend-production.up.railway.app';
+  const LOCAL_API_BASE_URL = 'http://localhost:8080';
+  const hostname = String(window.location.hostname || '').toLowerCase();
+  if (['localhost', '127.0.0.1', '::1'].includes(hostname)) {
+    return LOCAL_API_BASE_URL;
+  }
+  // Never let a query parameter select the API origin. This page holds an
+  // administrator Bearer token, so `?apiBase=https://attacker.example` would
+  // otherwise make the browser send that token to an untrusted host.
+  return PROD_API_BASE_URL;
+})();
 
 let authToken = localStorage.getItem('adminToken') || '';
 let adminUser = JSON.parse(localStorage.getItem('adminUser') || 'null');
-let csrfToken = '';
 
 const state = {
   currentSection: 'dashboard',
@@ -22,6 +31,7 @@ const state = {
     pinOrders: 1,
     memberships: 1,
     rewardRecords: 1,
+    withdrawals: 1,
   },
   selectedReportIds: new Set(),
   selectedUserIds: new Set(),
@@ -29,16 +39,352 @@ const state = {
   selectedMovingIds: new Set(),
   selectedStorageIds: new Set(),
   movingServicesById: new Map(),
+  withdrawalsById: new Map(),
   selectedMovingServiceId: null,
   movingWorkflowDefaultQuote: 0,
   movingWorkflowSubmitting: false,
+  featureFlags: {
+    paymentsEnabled: false,
+    platformDeliveryEnabled: false,
+    platformDeliveryMessage: '',
+  },
 };
+
+const listingReviewState = { generation: 0, controllers: new Set(), urls: new Set(), busy: false, view: 'CURRENT' };
+const paymentsUnavailableMessage = '线上支付、充值、提现和付费权益购买暂未开放。历史记录只读，赠送权益不收款。';
+
+function clearListingReview() {
+  listingReviewState.generation++;
+  for (const controller of listingReviewState.controllers) controller.abort();
+  for (const url of listingReviewState.urls) URL.revokeObjectURL(url);
+  listingReviewState.controllers.clear(); listingReviewState.urls.clear(); listingReviewState.busy = false;
+  listingReviewState.view = 'CURRENT';
+  for (const id of ['listingReviewList', 'listingReviewDetail', 'listingReviewPages', 'listingReviewStatus',
+    'privacyMaintenanceStatus','privacyMaintenanceJobs','privacyMaintenanceEvidence','privacyMaintenancePages']) {
+    const node = document.getElementById(id); if (node) node.replaceChildren();
+  }
+}
+
+function listingReviewContext(section = 'listingReview') {
+  const token = authToken, generation = listingReviewState.generation;
+  return { token, current: () => token && token === authToken && generation === listingReviewState.generation && state.currentSection === section };
+}
+async function listingReviewRequest(context, endpoint, command, bytes = false, prefix = '/admin/listing-reviews') {
+  const controller = new AbortController(); listingReviewState.controllers.add(controller);
+  const timer = setTimeout(() => controller.abort(), 25000);
+  try {
+    if (!context.current()) throw new Error('页面或账号已变化。');
+    const response = await fetch(`${API_BASE_URL}${prefix}${endpoint}`, { method: command ? 'POST' : 'GET',
+      headers: { Authorization: `Bearer ${context.token}`, ...(command ? { 'Content-Type': 'application/json' } : {}) },
+      body: command ? JSON.stringify(command) : undefined, cache: 'no-store', credentials: 'omit', redirect: 'error', signal: controller.signal });
+    if (!context.current()) throw new Error('页面或账号已变化。');
+    if (!response.ok) {
+      const failure = await response.json().catch(() => ({}));
+      throw new Error(typeof failure.error === 'string' ? failure.error.slice(0, 500) : '读取未完成，请刷新后重试。');
+    }
+    if (bytes) {
+      const type = response.headers.get('Content-Type') || '';
+      if (!['image/jpeg','image/png','image/gif','image/webp'].includes(type)) throw new Error('图片响应无效。');
+      const blob = await response.blob();
+      if (blob.size > 10485760) throw new Error('图片响应过大。');
+      return blob;
+    }
+    return await response.json();
+  } finally { clearTimeout(timer); listingReviewState.controllers.delete(controller); }
+}
+async function loadListingReviews(page = 1) {
+  clearListingReview();
+  const context = listingReviewContext(); if (!context.current()) return;
+  setText('listingReviewStatus', '正在读取待审核商品…');
+  try {
+    const data = await listingReviewRequest(context, `?page=${page}`);
+    if (!context.current()) return;
+    if (!Array.isArray(data.reviews) || data.reviews.length > 25 || !Number.isSafeInteger(data.total) || data.total < 0) throw new Error('审核列表响应无效。');
+    const host = document.getElementById('listingReviewList');
+    for (const row of data.reviews) {
+      if (!/^[0-9a-f-]{36}$/i.test(row.id) || typeof row.title !== 'string') throw new Error('审核记录无效。');
+      const button = document.createElement('button'); button.type = 'button'; button.className = 'card block w-full text-left';
+      button.textContent = `${row.title} · ${row.status === 'APPEALED' ? '申诉待复核' : '待审核'}`;
+      button.addEventListener('click', () => openListingReview(row.id)); host.appendChild(button);
+    }
+    setText('listingReviewStatus', data.total ? `共有 ${data.total} 项待审核。` : '暂无待审核商品。');
+    renderPagination('listingReviewPages', page, Math.max(1, Math.ceil(data.total / 25)), loadListingReviews);
+  } catch (error) { if (context.current()) setText('listingReviewStatus', error.message); }
+}
+function refreshListingReviewView() {
+  return listingReviewState.view === 'CURRENT' ? loadListingReviews() : loadExpiredListingAppeals(1, listingReviewState.view);
+}
+
+async function loadExpiredListingAppeals(page = 1, caseState = 'PENDING') {
+  if (!['PENDING','CLOSED'].includes(caseState)) return;
+  clearListingReview(); listingReviewState.view = caseState;
+  const context = listingReviewContext(); if (!context.current()) return;
+  setText('listingReviewStatus', caseState === 'CLOSED' ? '正在读取已结案申诉…' : '正在读取过期未决申诉…');
+  try {
+    const data = await listingReviewRequest(context, `/appeals?page=${page}&state=${caseState}`);
+    if (!context.current()) return;
+    if (!Array.isArray(data.cases) || data.cases.length > 25 || data.page !== page || data.pageSize !== 25
+      || data.state !== caseState || !Number.isSafeInteger(data.total) || data.total < 0) throw new Error('申诉队列响应无效。');
+    const labels = { READY: '待核查结案', CLOSED: '已结案', SELF_REVIEW_FORBIDDEN: '本人商品，需由其他管理员处理',
+      SOURCE_REVIEW_REQUIRED: '原始记录需核查', POLICY_REVIEW_REQUIRED: '审核规则需核查', CURRENT_REVIEW_REQUIRED: '请使用当前审核入口' };
+    const host = document.getElementById('listingReviewList');
+    for (const row of data.cases) {
+      if (!/^[0-9a-f-]{36}$/i.test(row.id) || typeof row.title !== 'string') throw new Error('申诉记录无效。');
+      const button = document.createElement('button'); button.type = 'button'; button.className = 'card block w-full text-left';
+      button.textContent = `${row.title} · ${labels[row.eligibility] || '状态待核查'}`;
+      button.addEventListener('click', () => openExpiredListingAppeal(row.id)); host.appendChild(button);
+    }
+    setText('listingReviewStatus', `${caseState === 'CLOSED' ? '已结案' : '过期未决'}申诉共 ${data.total} 项。结案不会自动发布商品。`);
+    renderPagination('listingReviewPages', page, Math.max(1, Math.ceil(data.total / 25)), value => loadExpiredListingAppeals(value, caseState));
+  } catch (error) { if (context.current()) setText('listingReviewStatus', error.message); }
+}
+
+async function openExpiredListingAppeal(id) {
+  listingReviewState.generation++;
+  for (const controller of listingReviewState.controllers) controller.abort();
+  for (const url of listingReviewState.urls) URL.revokeObjectURL(url);
+  listingReviewState.urls.clear(); listingReviewState.busy = false;
+  const context = listingReviewContext(), host = document.getElementById('listingReviewDetail'); host.replaceChildren();
+  const paragraph = text => { const p = document.createElement('p'); p.className = 'whitespace-pre-wrap mb-2'; p.textContent = text; host.appendChild(p); return p; };
+  try {
+    const row = await listingReviewRequest(context, `/appeals/${id}`); if (!context.current()) return;
+    if (row.id !== id || !Number.isSafeInteger(row.reviewRevision) || row.reviewRevision < 1 || !row.content
+      || !Number.isSafeInteger(row.imageCount) || row.imageCount < 0 || row.imageCount > 5) throw new Error('申诉详情无效。');
+    const fields = { title: '标题', category: '分类', description: '描述', conditionLabel: '成色', dimensions: '尺寸', pickupCity: '城市', pickupAddress: '取货位置' };
+    for (const [field, label] of Object.entries(fields)) paragraph(`${label}：${String(row.content[field] ?? '')}`);
+    paragraph(`原审核说明：${row.originalDecisionReason || '未记录'}`);
+    paragraph(`申诉理由：${row.appeal || '需核查原始记录'}`);
+    paragraph('本轮审核已失效。结案只处理原申诉；后续发布仍需重新提交审核。');
+    if (row.closure) {
+      const labels = { UPHELD: '维持原决定', OVERTURNED: '申诉成立' };
+      if (!['UPHELD','OVERTURNED'].includes(row.closure.outcome) || row.closure.reviewId !== id || row.closure.publicationRestored !== false
+        || row.closure.requiresNewReview !== true || typeof row.closure.reason !== 'string'
+        || row.closure.reason.length < 5 || row.closure.reason.length > 500) throw new Error('结案结果需重新核查。');
+      paragraph(`结案结果：${labels[row.closure.outcome]}`); paragraph(`结案理由：${row.closure.reason}`);
+      paragraph(`结案时间：${formatDateTime(row.closure.closedAt)}`); return;
+    }
+    if (row.eligibility !== 'READY' || !Number.isSafeInteger(row.appealRevision) || row.appealRevision < 1) {
+      const messages = { SELF_REVIEW_FORBIDDEN: '不能处理自己的商品申诉，请由其他管理员核查。',
+        SOURCE_REVIEW_REQUIRED: '原始记录不完整，需先核查来源和证据；当前保留待处理。',
+        POLICY_REVIEW_REQUIRED: '原审核规则尚需核查；当前保留待处理。',
+        CURRENT_REVIEW_REQUIRED: '本轮仍在有效期，请通过当前审核入口处理。' };
+      paragraph(messages[row.eligibility] || '申诉状态已变化，请刷新。'); return;
+    }
+    const imageHost = document.createElement('div'); imageHost.className = 'flex flex-wrap gap-3'; host.appendChild(imageHost);
+    const imageButton = document.createElement('button'); imageButton.type = 'button'; imageButton.className = 'btn-gray my-3';
+    imageButton.textContent = '核查原审核全部图片'; imageButton.hidden = row.imageCount === 0; host.appendChild(imageButton);
+    const outcome = document.createElement('select'); outcome.className = 'input block my-3'; outcome.setAttribute('aria-label', '申诉结案结果');
+    for (const [value, text] of [['','请选择结案结果'],['UPHELD','维持原决定'],['OVERTURNED','申诉成立']]) {
+      const option = document.createElement('option'); option.value = value; option.textContent = text; outcome.appendChild(option);
+    }
+    host.appendChild(outcome);
+    const reason = document.createElement('textarea'); reason.className = 'input w-full my-3'; reason.maxLength = 500;
+    reason.setAttribute('aria-label', '结案理由'); reason.placeholder = '说明证据及结案依据（5–500 字，卖家可见）'; host.appendChild(reason);
+    const label = document.createElement('label'); label.className = 'block my-3';
+    const acknowledged = document.createElement('input'); acknowledged.type = 'checkbox'; label.appendChild(acknowledged);
+    label.appendChild(document.createTextNode(' 已核查本轮申诉及原审核证据，确认此结案决定')); host.appendChild(label);
+    const close = document.createElement('button'); close.type = 'button'; close.className = 'btn-gray'; close.textContent = '确认结案'; host.appendChild(close);
+    const status = paragraph('证据不可读取或不完整时，请保留待处理。'); status.setAttribute('role', 'status');
+    let imagesReady = row.imageCount === 0;
+    const update = () => {
+      close.disabled = listingReviewState.busy || !imagesReady || !acknowledged.checked || !outcome.value || reason.value.trim().length < 5;
+      outcome.disabled = reason.disabled = acknowledged.disabled = listingReviewState.busy;
+    };
+    outcome.addEventListener('change', update); reason.addEventListener('input', update); acknowledged.addEventListener('change', update); update();
+    imageButton.addEventListener('click', async () => {
+      imageButton.disabled = true; imageHost.replaceChildren();
+      for (const url of listingReviewState.urls) URL.revokeObjectURL(url); listingReviewState.urls.clear();
+      try {
+        for (let index = 0; index < row.imageCount; index++) {
+          const blob = await listingReviewRequest(context, `/appeals/${id}/images/${index}`, null, true);
+          if (!context.current()) return;
+          const url = URL.createObjectURL(blob); listingReviewState.urls.add(url);
+          const img = document.createElement('img'); img.src = url; img.alt = `原审核图片 ${index + 1}`; img.className = 'max-w-xs max-h-80 object-contain'; imageHost.appendChild(img);
+        }
+        imagesReady = true; status.textContent = '请结合申诉理由核查全部证据，再填写结案决定。'; update();
+      } catch (error) { if (context.current()) { status.textContent = `图片核查未完成，暂不能结案。${error.message}`; imageButton.disabled = false; } }
+    });
+    close.addEventListener('click', async () => {
+      if (!context.current() || close.disabled || listingReviewState.busy) return;
+      listingReviewState.busy = true; imageButton.disabled = true; update();
+      try {
+        const result = await listingReviewRequest(context, `/appeals/${id}/close`, { operationKey: crypto.randomUUID(),
+          reviewRevision: row.reviewRevision, appealRevision: row.appealRevision, outcome: outcome.value, reason: reason.value.trim() });
+        if (!context.current()) return;
+        if (result.reviewId !== id || !['UPHELD','OVERTURNED'].includes(result.outcome)
+          || result.publicationRestored !== false || result.requiresNewReview !== true) throw new Error('结案响应需核查。');
+        await openExpiredListingAppeal(id);
+      } catch (error) {
+        if (context.current()) status.textContent = `未确认结案结果，请刷新详情或查看已结案队列；不要重复提交。${error.message}`;
+        // Remain disabled after uncertainty. A fresh GET observes the result.
+      }
+    });
+  } catch (error) { if (context.current()) { host.replaceChildren(); setText('listingReviewStatus', error.message); } }
+}
+async function openListingReview(id) {
+  // Replace the previous detail and invalidate its late image/decision calls.
+  listingReviewState.generation++;
+  for (const controller of listingReviewState.controllers) controller.abort();
+  for (const url of listingReviewState.urls) URL.revokeObjectURL(url);
+  listingReviewState.urls.clear(); listingReviewState.busy = false;
+  const context = listingReviewContext(), host = document.getElementById('listingReviewDetail'); host.replaceChildren();
+  try {
+    const row = await listingReviewRequest(context, `/${id}`); if (!context.current()) return;
+    if (row.id !== id || !Number.isSafeInteger(row.revision) || row.revision < 1 || !row.content || !Number.isSafeInteger(row.imageCount) || row.imageCount < 0 || row.imageCount > 5) throw new Error('审核详情无效。');
+    if (row.canDecide !== true || row.validity !== 'CURRENT') {
+      setText('listingReviewStatus', '本轮审核已失效或已处理，请刷新列表。'); return;
+    }
+    for (const [label, value] of Object.entries(row.content)) {
+      const p = document.createElement('p'); p.className = 'whitespace-pre-wrap mb-2';
+      const labels = { title: '标题', category: '分类', description: '描述', conditionLabel: '成色', dimensions: '尺寸', pickupCity: '城市', pickupAddress: '取货位置' };
+      p.textContent = `${labels[label] || '内容'}：${String(value ?? '')}`; host.appendChild(p);
+    }
+    if (row.appeal) { const p = document.createElement('p'); p.textContent = `申诉原因：${row.appeal}`; host.appendChild(p); }
+    const imageHost = document.createElement('div'); imageHost.className = 'flex flex-wrap gap-3'; host.appendChild(imageHost);
+    const imageButton = document.createElement('button'); imageButton.type = 'button'; imageButton.className = 'btn-gray my-3'; imageButton.textContent = '打开全部待审核图片';
+    let imagesReady = row.imageCount === 0;
+    imageButton.hidden = imagesReady; host.appendChild(imageButton);
+    const status = document.createElement('p'); status.setAttribute('role', 'status'); host.appendChild(status);
+    const reason = document.createElement('textarea'); reason.className = 'input w-full my-3'; reason.maxLength = 500;
+    reason.setAttribute('aria-label', '审核决定理由'); reason.placeholder = '请说明审核决定（5–500 字，卖家可见）'; host.appendChild(reason);
+    const approve = document.createElement('button'), reject = document.createElement('button');
+    for (const [button, label] of [[approve, '通过审核'], [reject, '退回修改']]) { button.type = 'button'; button.className = 'btn-gray mr-3'; button.textContent = label; host.appendChild(button); }
+    const updateButtons = () => { approve.disabled = listingReviewState.busy || !imagesReady; reject.disabled = listingReviewState.busy; };
+    updateButtons();
+    imageButton.addEventListener('click', async () => {
+      imageButton.disabled = true; imageHost.replaceChildren();
+      for (const url of listingReviewState.urls) URL.revokeObjectURL(url);
+      listingReviewState.urls.clear();
+      try {
+        for (let index = 0; index < row.imageCount; index++) {
+          const blob = await listingReviewRequest(context, `/${id}/images/${index}`, null, true);
+          if (!context.current()) return;
+          const url = URL.createObjectURL(blob); listingReviewState.urls.add(url);
+          const img = document.createElement('img'); img.src = url; img.alt = `待审核图片 ${index + 1}`; img.className = 'max-w-xs max-h-80 object-contain'; imageHost.appendChild(img);
+        }
+        imagesReady = true; status.textContent = '请核查全部图片后作出决定。'; updateButtons();
+      } catch (error) { if (context.current()) { status.textContent = error.message; imageButton.disabled = false; } }
+    });
+    const decide = async action => {
+      if (!context.current() || listingReviewState.busy) return;
+      const explanation = reason.value.trim(); if (explanation.length < 5) { status.textContent = '请填写至少 5 字的审核理由。'; return; }
+      listingReviewState.busy = true; updateButtons();
+      try {
+        await listingReviewRequest(context, `/${id}/decision`, { operationKey: crypto.randomUUID(), revision: row.revision, action, reason: explanation });
+        if (context.current()) await loadListingReviews();
+      } catch (error) {
+        if (context.current()) status.textContent = `未确认操作结果，请先刷新审核状态。${error.message}`;
+        // Keep writes disabled after uncertainty; refresh observes the result.
+      }
+    };
+    approve.addEventListener('click', () => decide('APPROVE')); reject.addEventListener('click', () => decide('REJECT'));
+  } catch (error) { if (context.current()) setText('listingReviewStatus', error.message); }
+}
+
+async function loadPrivacyMaintenance(page = 1) {
+  clearListingReview();
+  const context = listingReviewContext('privacyMaintenance'); if (!context.current()) return;
+  setText('privacyMaintenanceStatus', '正在读取维护状态…');
+  const request = (prefix, endpoint = '', command) => listingReviewRequest(context, endpoint, command, false, prefix);
+  try {
+    const data = await request('/admin/privacy-maintenance'); if (!context.current()) return;
+    const names = { EXPIRY: '到期资料处理', EVIDENCE: '到期未提交附件', DELETION: '已排队注销任务', HEALTH: '维护状态核查' };
+    if (!Array.isArray(data.jobs) || data.jobs.length < 2 || data.jobs.length > 4
+      || new Set(data.jobs.map(row => row.name)).size !== data.jobs.length
+      || data.jobs.some(row => !Object.prototype.hasOwnProperty.call(names, row.name))) throw new Error('维护状态响应无效。');
+    const states = { NOT_STARTED: '未运行', RUNNING: '运行中', SUCCEEDED: '本次运行完成', FAILED: '运行未完成' };
+    const host = document.getElementById('privacyMaintenanceJobs');
+    for (const row of data.jobs) {
+      const card = document.createElement('div'); card.className = 'card';
+      const heading = document.createElement('p'); heading.textContent = `${names[row.name] || '维护任务'}：${states[row.state] || '状态待确认'}`; card.appendChild(heading);
+      const detail = document.createElement('p'); detail.className = 'text-sm mt-2';
+      detail.textContent = row.stale || row.leaseExpired ? '记录过期或任务可能中断，需要核查。' : `最近成功运行：${formatDateTime(row.lastSuccessAt)}`; card.appendChild(detail);
+      if (row.name === 'HEALTH' && row.summary) {
+        const dependency = document.createElement('p'); dependency.className = 'text-sm mt-2';
+        const labels = { REACHABLE: '可连接', UNAVAILABLE: '不可连接', NOT_CONFIGURED: '未配置', NOT_PROBED: '未核查' };
+        dependency.textContent = `数据库：${labels[row.summary.database] || '未知'}；缓存：${labels[row.summary.redis] || '未知'}；对象存储：${labels[row.summary.objectStorage] || '未知'}`;
+        card.appendChild(dependency);
+      }
+      if (row.name === 'EXPIRY' && row.summary) {
+        const reviews = document.createElement('p'); reviews.className = 'text-sm mt-2';
+        const count = Number.isSafeInteger(row.summary.reviewSnapshotsRemoved) ? row.summary.reviewSnapshotsRemoved : 0;
+        reviews.textContent = row.summary.reviewRetention === 'BATCH_COMPLETED'
+          ? `本批清理 ${count} 条到期审核记录。图片对象和备份尚未清理。` : '审核到期清理尚未启用。';
+        card.appendChild(reviews);
+      }
+      if (row.name === 'EVIDENCE' && row.summary) {
+        const evidence = document.createElement('p'); evidence.className = 'text-sm mt-2';
+        const count = key => Number.isSafeInteger(row.summary[key]) ? row.summary[key] : '待核查';
+        evidence.textContent = `本批已清理 ${count('retired')} 个到期未提交附件；待确认 ${count('pending')} 个。已提交举报附件不在此任务内。`;
+        card.appendChild(evidence);
+      }
+      if (row.name === 'HEALTH' && row.summary?.reviewRetention === 'ASSESSED') {
+        const reviews = document.createElement('p'); reviews.className = 'text-sm mt-2';
+        const count = key => Number.isSafeInteger(row.summary[key]) ? row.summary[key] : '待核查';
+        reviews.textContent = `审核记录：到期 ${count('dueReviewSnapshots')}；受保全 ${count('heldReviewSnapshots')}；过期未决申诉 ${count('unresolvedExpiredAppeals')}；来源待核查 ${count('untrackedDueReviewSnapshots')}；待核实备份的回执 ${count('reviewReceiptsAwaitingBackupProof')}。`;
+        card.appendChild(reviews);
+      }
+      if (row.summary?.attentionRequired) { const alert = document.createElement('p'); alert.textContent = '存在需处理的保全、备份证明、未确认附件或审核记录，请查看具体状态。'; card.appendChild(alert); }
+      host.appendChild(card);
+    }
+    setText('privacyMaintenanceStatus', '任务运行完成不代表全部资料清理完成。外部告警送达与完整恢复仍待验收。');
+  } catch (error) { if (context.current()) setText('privacyMaintenanceStatus', error.message); }
+  if (!context.current()) return;
+  try {
+    const data = await request('/admin/evidence-maintenance', `?page=${page}`); if (!context.current()) return;
+    if (!Array.isArray(data.rows) || data.rows.length > 25 || !Number.isSafeInteger(data.total) || data.total < 0) throw new Error('附件队列响应无效。');
+    const host = document.getElementById('privacyMaintenanceEvidence');
+    const labels = { PENDING: '上传待确认', VERIFY_REQUIRED: '需要核查', RECONCILING: '核查中', AVAILABLE: '已确认上传', MISSING: '未找到对象', DELETE_PENDING: '清理待确认', DELETE_UNCERTAIN: '清理结果不明', DELETED: '线上对象已清理' };
+    for (const row of data.rows) {
+      if (!/^[a-f0-9-]{36}$/i.test(row.id) || !Number.isSafeInteger(row.revision) || row.revision < 1 || row.attached !== false) throw new Error('附件记录无效。');
+      const card = document.createElement('div'); card.className = 'card';
+      const p = document.createElement('p'); p.textContent = `${labels[row.status] || '状态待确认'} · ${formatDateTime(row.createdAt)}`; card.appendChild(p);
+      for (const [action, text] of [['RECONCILE','核查上传结果'],['RETIRE','清理过期附件']]) {
+        const button = document.createElement('button'); button.type = 'button'; button.className = 'btn-gray mr-3 mt-3'; button.textContent = text;
+        button.disabled = action === 'RETIRE' && (!Number.isFinite(Date.parse(row.cleanupEligibleAfter)) || Date.parse(row.cleanupEligibleAfter) > Date.now());
+        button.addEventListener('click', async () => {
+          if (!context.current()) return;
+          if (action === 'RETIRE') {
+            const confirmation = await openAdminDialog({ title: '清理过期未提交附件', bodyHtml: '<p>仅处理这一个尚未提交的附件。已关联举报或存在保全时会停止。确认继续？</p>', confirmText: '确认处理', cancelText: '取消', presentation: 'drawer' });
+            if (!confirmation.confirmed || !context.current()) return;
+          }
+          for (const entry of card.querySelectorAll('button')) entry.disabled = true;
+          try {
+            await request('/admin/evidence-maintenance', `/${row.id}`, { revision: row.revision, action });
+            if (context.current()) await loadPrivacyMaintenance(page);
+          } catch (error) { if (context.current()) setText('privacyMaintenanceStatus', `未确认处理结果，请先刷新。${error.message}`); }
+        });
+        card.appendChild(button);
+      }
+      host.appendChild(card);
+    }
+    if (!data.rows.length) host.textContent = '本页没有待处理附件。';
+    renderPagination('privacyMaintenancePages', page, Math.max(1, Math.ceil(data.total / 25)), loadPrivacyMaintenance);
+  } catch (error) {
+    if (context.current()) document.getElementById('privacyMaintenanceEvidence').textContent = error.message;
+  }
+}
+
+function paymentsAreEnabled() {
+  return state.featureFlags.paymentsEnabled === true;
+}
+
+function renderPaymentsNoticeBanners() {
+  for (const id of ['paymentsCommercializationBanner', 'paymentsWithdrawalsBanner', 'paymentsConfigBanner']) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    el.textContent = paymentsUnavailableMessage;
+    el.className = paymentsAreEnabled() ? 'hidden' : 'rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 mb-4';
+  }
+  setText('withdrawalsHint', paymentsAreEnabled() ? '点击提现记录可展开详情与处理动作。' : '历史提现记录只读，当前不能打款、驳回或标记失败。');
+}
 
 const adminDialogState = {
   resolve: null,
   escHandler: null,
   config: null,
   fields: [],
+  presentation: 'drawer',
 };
 
 const MOVING_WORKFLOW_TIME_WHEEL_IDS = ['movingWorkflowEstimatedPickupAt', 'movingWorkflowEstimatedDeliveryAt'];
@@ -92,6 +438,81 @@ function maskEmail(value) {
   return `${prefix}${localPart.length > 2 ? '***' : '*'}${suffix}@${domainPart}`;
 }
 
+function formatPaymentChannelLabel(channel) {
+  const normalized = String(channel || '').trim().toUpperCase();
+  switch (normalized) {
+    case 'STRIPE':
+      return 'Stripe';
+    case 'APPLE_IAP':
+      return 'Apple 内购';
+    case 'OFFLINE':
+      return '线下支付';
+    case 'MOCK_WECHAT':
+      return '模拟微信';
+    case 'MOCK_ALIPAY':
+      return '模拟支付宝';
+    case 'MOCK_CARD':
+      return '模拟银行卡';
+    case 'MOCK_OFFLINE':
+      return '模拟线下支付';
+    case 'UNKNOWN':
+      return '未知';
+    default:
+      return normalized || '-';
+  }
+}
+
+function pinOrderActionLabel(action) {
+  switch (String(action || '').toUpperCase()) {
+    case 'CONFIRM':
+      return '确认支付';
+    case 'FAIL':
+      return '标记失败';
+    case 'CANCEL_PIN':
+      return '取消置顶';
+    case 'EXTEND_24H':
+      return '延长24小时';
+    case 'EXTEND_72H':
+      return '延长72小时';
+    case 'EXTEND_7D':
+      return '延长7天';
+    default:
+      return String(action || '置顶操作');
+  }
+}
+
+function normalizeMembershipGrantMode(value) {
+  const normalized = String(value || '').trim().toUpperCase();
+  if (normalized === 'PENDING' || normalized === '待处理') return 'PENDING';
+  return 'CONFIRM';
+}
+
+function normalizeRewardType(value) {
+  const normalized = String(value || '').trim().toUpperCase().replace(/\s+/g, '_');
+  const compact = normalized.replace(/[^A-Z0-9_\u4e00-\u9fff]/g, '');
+  if (compact === 'PIN_CREDIT' || compact === '置顶' || compact === '置顶时长') return 'PIN_CREDIT';
+  if (compact === 'MEMBERSHIP_30D' || compact === 'MEMBERSHIP30D' || compact === '会员30天' || compact === '会员') {
+    return 'MEMBERSHIP_30D';
+  }
+  if (compact === 'POINTS' || compact === '积分') return 'POINTS';
+  if (compact === 'BALANCE' || compact === '余额') return 'BALANCE';
+  return normalized;
+}
+
+function normalizeFeedbackRewardType(value) {
+  const normalized = String(value || '').trim().toUpperCase().replace(/\s+/g, '_');
+  const compact = normalized.replace(/[^A-Z0-9_\u4e00-\u9fff]/g, '');
+  if (compact === 'NONE' || compact === '不发放' || compact === '无') return 'NONE';
+  if (compact === 'PIN_CREDIT' || compact === '置顶' || compact === '置顶时长') return 'PIN_CREDIT';
+  if (compact === 'COUPON' || compact === '代金券' || compact === '优惠券') return 'COUPON';
+  if (compact === 'MEMBERSHIP_DAYS' || compact === 'MEMBERSHIPDAYS' || compact === '会员天数' || compact === '会员') {
+    return 'MEMBERSHIP_DAYS';
+  }
+  if (compact === 'POINTS' || compact === '积分') return 'POINTS';
+  if (compact === 'BALANCE' || compact === '余额') return 'BALANCE';
+  return normalized;
+}
+
 function maskPhone(value) {
   const phone = String(value || '').trim();
   if (!phone) return '-';
@@ -106,6 +527,14 @@ function maskContact(value) {
   if (contact.includes('@')) return maskEmail(contact);
   if (/\d/.test(contact)) return maskPhone(contact);
   return contact;
+}
+
+function maskAccountNumber(value) {
+  const account = String(value || '').trim();
+  if (!account) return '-';
+  const digits = account.replace(/\D/g, '');
+  if (digits.length <= 4) return account;
+  return `${digits.slice(0, 2)}****${digits.slice(-4)}`;
 }
 
 function humanizeLogKey(key) {
@@ -136,6 +565,14 @@ function humanizeLogKey(key) {
     requestedStatus: '请求状态',
     rewardType: '奖励类型',
     rewardValue: '奖励值',
+    withdrawalRequestId: '提现申请 ID',
+    payoutReference: '转账参考号',
+    bankName: '银行名称',
+    accountName: '收款户名',
+    accountNumber: '银行卡号',
+    bsb: 'BSB',
+    withdrawableBalance: '可提现余额',
+    salesTotal: '销售总额',
     sameStatus: '同状态提交',
     serviceId: '服务单 ID',
     source: '来源',
@@ -175,6 +612,9 @@ function formatLogValue(value, key = '') {
     }
     if ((normalizedKey.includes('phone') || normalizedKey.includes('mobile') || normalizedKey.includes('tel')) && /\d/.test(value)) {
       return maskPhone(value);
+    }
+    if (normalizedKey.includes('accountnumber') || normalizedKey.includes('bankaccount')) {
+      return maskAccountNumber(value);
     }
     return value;
   }
@@ -266,11 +706,20 @@ function formatStatusBadge(label, type = 'default') {
 }
 
 function resolveImageUrl(image) {
-  if (!image) return '';
-  if (typeof image === 'string' && (image.startsWith('http://') || image.startsWith('https://'))) {
-    return image;
+  const raw = String(image || '').trim();
+  if (!raw) return '';
+
+  try {
+    const parsed = new URL(raw);
+    if ((parsed.protocol === 'https:' || parsed.protocol === 'http:') && !parsed.username && !parsed.password) {
+      return parsed.href;
+    }
+    return '';
+  } catch {
+    // Local object identifiers are treated as opaque data rather than a path.
+    // Encoding prevents a historical value from escaping the uploads route.
+    return `${API_BASE_URL}/uploads/${encodeURIComponent(raw)}`;
   }
-  return `${API_BASE_URL}/uploads/${image}`;
 }
 
 function getImages(images) {
@@ -298,6 +747,73 @@ function parseJsonNotes(notes) {
   }
 }
 
+function setInlineBanner(id, tone, message) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const text = String(message || '').trim();
+  if (!text) {
+    el.className = 'hidden';
+    el.textContent = '';
+    return;
+  }
+
+  const toneClass =
+    tone === 'warn'
+      ? 'rounded border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800'
+      : tone === 'error'
+      ? 'rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700'
+      : 'rounded border border-sky-300 bg-sky-50 px-3 py-2 text-sm text-sky-700';
+
+  el.className = toneClass;
+  el.textContent = text;
+}
+
+function renderPlatformDeliveryNoticeBanners() {
+  const enabled = Boolean(state.featureFlags.platformDeliveryEnabled);
+  const backendMessage = String(state.featureFlags.platformDeliveryMessage || '').trim();
+  const configMessage = enabled
+    ? '平台配送当前允许新建，请先确认后端发布策略后再操作。'
+    : backendMessage || '平台配送已移出当前 V1；管理端仅保留历史查看。';
+  const movingMessage = enabled
+    ? '平台配送当前允许运行，请确认仅在受控流程内操作。'
+    : '平台配送已移出当前 V1。历史服务单只读，不可付款、指派或推进状态。';
+
+  setInlineBanner('platformDeliveryFlagBanner', enabled ? 'info' : 'warn', configMessage);
+  setInlineBanner('movingPlatformDeliveryBanner', enabled ? 'info' : 'warn', movingMessage);
+}
+
+function formatRouteDistanceKm(value) {
+  const distance = Number(value);
+  if (!Number.isFinite(distance) || distance <= 0) return '未知距离';
+  return `${distance.toFixed(2)} km`;
+}
+
+function formatRouteDurationMinutes(value) {
+  const duration = Number(value);
+  if (!Number.isFinite(duration) || duration <= 0) return '未知时长';
+  return `${Math.max(1, Math.round(duration))} 分钟`;
+}
+
+function formatRouteQuoteSummary(quote) {
+  if (!quote || typeof quote !== 'object') return '待平台估算';
+  if (typeof quote.routeSummary === 'string' && quote.routeSummary.trim()) {
+    return quote.routeSummary.trim();
+  }
+  const provider = String(quote.provider || 'ROUTE').trim() || 'ROUTE';
+  return `${provider} · ${formatRouteDistanceKm(quote.distanceKm)} · 约 ${formatRouteDurationMinutes(quote.durationMinutes)}`;
+}
+
+function formatRouteQuoteBreakdown(quote) {
+  if (!quote || typeof quote !== 'object') return '待平台估算';
+  const parts = [];
+  if (Number(quote.baseFee) > 0) parts.push(`基础${formatMoney(quote.baseFee)}`);
+  if (Number(quote.distanceFee) > 0) parts.push(`距离${formatMoney(quote.distanceFee)}`);
+  if (Number(quote.stairFee) > 0) parts.push(`楼层${formatMoney(quote.stairFee)}`);
+  if (Number(quote.packingFee) > 0) parts.push(`搬运${formatMoney(quote.packingFee)}`);
+  const total = Number(quote.totalFee) > 0 ? formatMoney(quote.totalFee) : 'A$0.00';
+  return parts.length ? `${parts.join(' · ')} · 总价 ${total}` : `总价 ${total}`;
+}
+
 function getReportEvidenceImages(report) {
   const direct = Array.isArray(report?.evidenceImages) ? report.evidenceImages : [];
   if (direct.length) return direct.filter(Boolean).slice(0, 3);
@@ -315,25 +831,33 @@ function getReportEvidenceImages(report) {
   return [];
 }
 
+function trustedReportEvidenceUrl(raw) {
+  try {
+    if (typeof raw !== 'string' || raw.includes('%')) return null;
+    const url = new URL(raw, API_BASE_URL);
+    if (url.origin !== new URL(API_BASE_URL).origin || url.username || url.password || url.search || url.hash
+      || !/^\/report-evidence\/[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(url.pathname)
+      || (raw !== url.pathname && raw !== url.href)) return null;
+    return url.href;
+  } catch { return null; }
+}
+
 function renderReportEvidenceImages(report) {
   const images = getReportEvidenceImages(report);
   if (!images.length) return '';
+  return `<div class="mt-2"><p class="text-xs text-gray-500 mb-1">私密证据图片（${images.length}）</p>
+    <div class="flex gap-2 flex-wrap">${images.map((raw, index) => {
+      const url = trustedReportEvidenceUrl(raw);
+      if (!url) return '<span class="text-xs text-amber-700">历史附件待核查</span>';
+      // Only the validated UUID enters markup; no external link or public image request.
+      const id = new URL(url).pathname.split('/').pop();
+      return `<button onclick="openPrivateReportEvidence('${id}')" class="btn-dark">查看证据 ${index + 1}</button>`;
+    }).join('')}</div></div>`;
+}
 
-  return `
-    <div class="mt-2">
-      <p class="text-xs text-gray-500 mb-1">证据图片（${images.length}）</p>
-      <div class="flex gap-2 flex-wrap">
-        ${images
-          .map((img) => {
-            const src = resolveImageUrl(img);
-            return `<a href="${escapeHtml(src)}" target="_blank" rel="noreferrer">
-                <img src="${escapeHtml(src)}" class="w-16 h-16 rounded object-cover border border-gray-200" />
-              </a>`;
-          })
-          .join('')}
-      </div>
-    </div>
-  `;
+async function openPrivateReportEvidence(id) {
+  const url = trustedReportEvidenceUrl('/report-evidence/' + id);
+  await openAuthorizedPrivateImage(url, '举报附件');
 }
 
 function getInputValue(id) {
@@ -352,168 +876,110 @@ function parseMovingWorkflowDateTime(rawValue) {
   const matched = text.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}):(\d{2})/);
   if (matched) {
     return {
-      dateValue: matched[1],
-      hourValue: matched[2],
-      minuteValue: matched[3],
+      inputValue: `${matched[1]}T${matched[2]}:${matched[3]}`,
+      previewValue: `${matched[1]} ${matched[2]}:${matched[3]}`,
     };
   }
 
   const parsed = new Date(text);
   if (Number.isNaN(parsed.getTime())) return null;
+  const dateValue = toLocalDateKey(parsed);
+  const hourValue = pad2(parsed.getHours());
+  const minuteValue = pad2(parsed.getMinutes());
   return {
-    dateValue: toLocalDateKey(parsed),
-    hourValue: pad2(parsed.getHours()),
-    minuteValue: pad2(parsed.getMinutes()),
+    inputValue: `${dateValue}T${hourValue}:${minuteValue}`,
+    previewValue: `${dateValue} ${hourValue}:${minuteValue}`,
   };
-}
-
-function getTimeWheelValues(part) {
-  const total = part === 'hour' ? 24 : 60;
-  return Array.from({ length: total }, (_item, index) => pad2(index));
-}
-
-function getTimeWheelContainerId(fieldId, part) {
-  return `${fieldId}${part === 'hour' ? 'HourWheel' : 'MinuteWheel'}`;
-}
-
-function getActiveTimeWheelValue(fieldId, part) {
-  const button = document.querySelector(`#${getTimeWheelContainerId(fieldId, part)} .time-wheel-option.active`);
-  return button ? String(button.dataset.value || '') : '';
 }
 
 function updateTimeWheelPreview(fieldId) {
   const preview = document.getElementById(`${fieldId}Preview`);
   if (!preview) return;
-  const dateValue = getInputValue(`${fieldId}Date`);
-  const hourValue = getActiveTimeWheelValue(fieldId, 'hour');
-  const minuteValue = getActiveTimeWheelValue(fieldId, 'minute');
-  preview.textContent = dateValue ? `${dateValue} ${hourValue || '--'}:${minuteValue || '--'}` : '未选择';
+  const parsed = parseMovingWorkflowDateTime(getInputValue(fieldId));
+  preview.textContent = parsed?.previewValue || '未选择';
 }
 
 function syncTimeWheelValue(fieldId) {
-  const hiddenInput = document.getElementById(fieldId);
-  if (!hiddenInput) return;
-  const dateValue = getInputValue(`${fieldId}Date`);
-  const hourValue = getActiveTimeWheelValue(fieldId, 'hour');
-  const minuteValue = getActiveTimeWheelValue(fieldId, 'minute');
-  hiddenInput.value = dateValue && hourValue && minuteValue ? `${dateValue} ${hourValue}:${minuteValue}` : '';
+  const input = document.getElementById(fieldId);
+  if (!input) return;
+  const parsed = parseMovingWorkflowDateTime(input.value);
+  input.value = parsed?.inputValue || '';
   updateTimeWheelPreview(fieldId);
 }
 
-function centerTimeWheelSelection(fieldId, part) {
-  const button = document.querySelector(`#${getTimeWheelContainerId(fieldId, part)} .time-wheel-option.active`);
-  if (!button) return;
-  button.scrollIntoView({ block: 'center', behavior: 'smooth' });
-}
-
-function selectTimeWheelValue(fieldId, part, value, shouldCenter = false) {
-  const container = document.getElementById(getTimeWheelContainerId(fieldId, part));
-  if (!container) return;
-  container.querySelectorAll('.time-wheel-option').forEach((button) => {
-    button.classList.toggle('active', button.dataset.value === value);
-  });
-  syncTimeWheelValue(fieldId);
-  if (shouldCenter) centerTimeWheelSelection(fieldId, part);
-}
-
-function adjustTimeWheelValue(fieldId, part, step) {
-  const values = getTimeWheelValues(part);
-  const currentValue = getActiveTimeWheelValue(fieldId, part);
-  const currentIndex = values.indexOf(currentValue);
-  const nextIndex = currentIndex >= 0 ? Math.min(values.length - 1, Math.max(0, currentIndex + step)) : step > 0 ? 0 : values.length - 1;
-  selectTimeWheelValue(fieldId, part, values[nextIndex], true);
-}
-
-function bindTimeWheelContainer(fieldId, part) {
-  const container = document.getElementById(getTimeWheelContainerId(fieldId, part));
-  if (!container || container.dataset.bound === '1') return;
-
-  container.addEventListener(
-    'wheel',
-    (event) => {
-      event.preventDefault();
-      adjustTimeWheelValue(fieldId, part, event.deltaY > 0 ? 1 : -1);
-    },
-    { passive: false }
-  );
-
-  container.addEventListener('keydown', (event) => {
-    if (event.key === 'ArrowDown' || event.key === 'ArrowRight') {
-      event.preventDefault();
-      adjustTimeWheelValue(fieldId, part, 1);
-    }
-    if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') {
-      event.preventDefault();
-      adjustTimeWheelValue(fieldId, part, -1);
-    }
-  });
-
-  container.dataset.bound = '1';
-}
-
-function ensureTimeWheelRendered(fieldId) {
-  ['hour', 'minute'].forEach((part) => {
-    const container = document.getElementById(getTimeWheelContainerId(fieldId, part));
-    if (!container) return;
-    if (!container.childElementCount) {
-      container.innerHTML = getTimeWheelValues(part)
-        .map(
-          (value) =>
-            `<button type="button" class="time-wheel-option" data-value="${value}" onclick="selectTimeWheelValue('${fieldId}', '${part}', '${value}', true)">${value}</button>`
-        )
-        .join('');
-    }
-    bindTimeWheelContainer(fieldId, part);
-  });
-}
-
 function clearTimeWheel(fieldId) {
-  const hiddenInput = document.getElementById(fieldId);
-  const dateInput = document.getElementById(`${fieldId}Date`);
-  if (hiddenInput) hiddenInput.value = '';
-  if (dateInput) dateInput.value = '';
-  ['hour', 'minute'].forEach((part) => {
-    const container = document.getElementById(getTimeWheelContainerId(fieldId, part));
-    if (!container) return;
-    container.querySelectorAll('.time-wheel-option.active').forEach((button) => button.classList.remove('active'));
-  });
+  const input = document.getElementById(fieldId);
+  if (input) input.value = '';
   updateTimeWheelPreview(fieldId);
 }
 
 function setTimeWheelValue(fieldId, rawValue) {
-  ensureTimeWheelRendered(fieldId);
-  clearTimeWheel(fieldId);
-
   const parsed = parseMovingWorkflowDateTime(rawValue);
-  if (!parsed) return;
-
-  const dateInput = document.getElementById(`${fieldId}Date`);
-  if (dateInput) dateInput.value = parsed.dateValue;
-  selectTimeWheelValue(fieldId, 'hour', parsed.hourValue, false);
-  selectTimeWheelValue(fieldId, 'minute', parsed.minuteValue, false);
-  centerTimeWheelSelection(fieldId, 'hour');
-  centerTimeWheelSelection(fieldId, 'minute');
+  const input = document.getElementById(fieldId);
+  if (!input) return;
+  input.value = parsed?.inputValue || '';
+  updateTimeWheelPreview(fieldId);
 }
 
 function seedTimeWheelDate(fieldId, rawDateValue) {
-  const dateInput = document.getElementById(`${fieldId}Date`);
-  if (!dateInput || dateInput.value) return;
+  const input = document.getElementById(fieldId);
+  if (!input || input.value) return;
   const dateValue = toLocalDateKey(rawDateValue);
   if (!dateValue) return;
-  dateInput.value = dateValue;
-  syncTimeWheelValue(fieldId);
+  input.value = `${dateValue}T09:00`;
+  updateTimeWheelPreview(fieldId);
 }
 
 function syncTimeWheelFromDate(fieldId) {
-  ensureTimeWheelRendered(fieldId);
   syncTimeWheelValue(fieldId);
 }
 
 function initializeMovingWorkflowTimeWheels() {
   MOVING_WORKFLOW_TIME_WHEEL_IDS.forEach((fieldId) => {
-    ensureTimeWheelRendered(fieldId);
     updateTimeWheelPreview(fieldId);
   });
+}
+
+function appendTextareaValues(id, values) {
+  const el = document.getElementById(id);
+  if (!el || !Array.isArray(values) || !values.length) return;
+  const existing = String(el.value || '').trim();
+  const merged = [existing, ...values.map((value) => String(value || '').trim()).filter(Boolean)].filter(Boolean).join('\n');
+  el.value = merged;
+}
+
+async function uploadMovingWorkflowFile(file) {
+  const formData = new FormData();
+  formData.append('file', file, file.name || 'moving-workflow-upload');
+  const result = await apiRequest('/upload', { method: 'POST', body: formData });
+  if (typeof result === 'string') return result;
+  if (result && typeof result === 'object') {
+    return String(result.url || result.data?.url || result.fileUrl || '').trim();
+  }
+  return '';
+}
+
+async function handleMovingWorkflowPickupUpload(event) {
+  const input = event?.target;
+  const files = Array.from(input?.files || []);
+  if (!files.length) return;
+
+  try {
+    setMovingWorkflowMessage('info', `正在上传 ${files.length} 个文件...`);
+    const uploadedUrls = [];
+    for (const file of files) {
+      const url = await uploadMovingWorkflowFile(file);
+      if (url) uploadedUrls.push(url);
+    }
+
+    appendTextareaValues('movingWorkflowPickupPhotos', uploadedUrls);
+    setMovingWorkflowMessage('success', uploadedUrls.length ? `已上传 ${uploadedUrls.length} 个文件` : '未获取到有效上传结果');
+  } catch (error) {
+    console.error('❌ 上传搬运/配送取货文件失败:', error);
+    setMovingWorkflowMessage('error', `上传失败：${error?.message || error}`);
+  } finally {
+    if (input) input.value = '';
+  }
 }
 
 function setText(id, value) {
@@ -693,6 +1159,13 @@ function resetSectionFilters(sectionName) {
       setInputValue('membershipSearch', '');
       setInputValue('membershipStatus', '');
       break;
+    case 'withdrawals':
+      setInputValue('withdrawalSearch', '');
+      setInputValue('withdrawalStatus', '');
+      setInputValue('withdrawalSortOrder', 'desc');
+      setInputValue('withdrawalDateFrom', '');
+      setInputValue('withdrawalDateTo', '');
+      break;
     default:
       break;
   }
@@ -733,6 +1206,9 @@ async function clearSectionFilters(sectionName) {
     case 'commercialization':
       await loadCommercializationSection();
       break;
+    case 'withdrawals':
+      await loadWithdrawalsSection();
+      break;
     default:
       break;
   }
@@ -763,6 +1239,9 @@ async function openSectionWithPreset(sectionName, presetKey) {
       setInputValue('movingStatus', 'PENDING');
       setInputValue('storageStatus', 'PENDING');
       break;
+    case 'withdrawals:pending':
+      setInputValue('withdrawalStatus', 'PENDING');
+      break;
     case 'orders:pendingDispute':
       setInputValue('orderHasDispute', 'true');
       break;
@@ -782,6 +1261,67 @@ function showError(message) {
 
 function showSuccess(message) {
   showToast(message, 'success');
+}
+
+function recoverableLoadMessage(context, error) {
+  const detail = String(error?.message || '').toLowerCase();
+
+  if (/(401|403|登录|权限|unauthorized|forbidden)/.test(detail)) {
+    return '登录状态或权限已变化，请重新登录后重试';
+  }
+  if (/(429|频繁|rate limit)/.test(detail)) {
+    return '请求过于频繁，请稍后重试';
+  }
+  if (/(timeout|超时)/.test(detail)) {
+    return '请求超时，请检查网络后重试';
+  }
+  if (/(network|failed to fetch|网络|连接)/.test(detail)) {
+    return '网络连接不可用，请检查网络后重试';
+  }
+
+  return `${context}暂时无法加载，请稍后重试`;
+}
+
+function renderRecoverableLoadError(containerId, message, retryAction, options = {}) {
+  const retryButtonId = `${containerId}RetryButton`;
+  const retryButton = `
+    <button
+      id="${retryButtonId}"
+      type="button"
+      class="btn-red mt-3"
+    >重新加载</button>
+  `;
+  const content = `
+    <div class="card text-center text-gray-600" role="alert">
+      <p>${escapeHtml(message)}</p>
+      ${retryButton}
+    </div>
+  `;
+  const tableColumnCount = Number(options.tableColumnCount || 0);
+
+  setHtml(
+    containerId,
+    tableColumnCount > 0
+      ? `<tr><td colspan="${tableColumnCount}" class="td">${content}</td></tr>`
+      : content
+  );
+
+  document.getElementById(retryButtonId)?.addEventListener('click', async () => {
+    const button = document.getElementById(retryButtonId);
+    if (button?.disabled) return;
+    if (button) {
+      button.disabled = true;
+      button.textContent = '加载中…';
+    }
+    try {
+      await retryAction();
+    } finally {
+      if (button?.isConnected) {
+        button.disabled = false;
+        button.textContent = '重新加载';
+      }
+    }
+  });
 }
 
 function ensureToastHost() {
@@ -847,30 +1387,18 @@ function showToast(message, type = 'info') {
   setTimeout(close, 2800);
 }
 
-async function fetchCsrfToken() {
-  try {
-    const response = await fetch(`${API_BASE_URL}/admin/csrf-token`, {
-      credentials: 'include',
-    });
-
-    if (!response.ok) return;
-
-    const data = await response.json();
-    csrfToken = data.csrfToken || '';
-  } catch (error) {
-    console.error('获取 CSRF Token 失败:', error);
-  }
-}
-
+let adminResponseGeneration = 0;
 async function apiRequest(endpoint, options = {}, expectBlob = false) {
+  const requestToken = authToken, requestGeneration = adminResponseGeneration;
   const url = `${API_BASE_URL}${endpoint}`;
   const config = {
     method: options.method || 'GET',
-    credentials: 'include',
+    // Admin authentication is explicit Bearer auth. Omitting ambient cookies
+    // keeps a cross-site request from acquiring any authentication context.
+    credentials: 'omit',
     cache: 'no-store',
     headers: {
       'Authorization': authToken ? `Bearer ${authToken}` : '',
-      'CSRF-Token': csrfToken,
       'Cache-Control': 'no-cache',
       'Pragma': 'no-cache',
       ...(options.headers || {}),
@@ -891,21 +1419,6 @@ async function apiRequest(endpoint, options = {}, expectBlob = false) {
       const payload = await response.json();
       if (payload?.error) errorMessage = payload.error;
 
-      if (response.status === 403 && String(payload?.error || '').includes('CSRF')) {
-        await fetchCsrfToken();
-        const retryConfig = {
-          ...config,
-          headers: {
-            ...config.headers,
-            'CSRF-Token': csrfToken,
-          },
-        };
-
-        const retry = await fetch(url, retryConfig);
-        if (retry.ok) {
-          return expectBlob ? retry.blob() : retry.json();
-        }
-      }
     } catch (_) {
       // ignore json parse error
     }
@@ -917,8 +1430,9 @@ async function apiRequest(endpoint, options = {}, expectBlob = false) {
     throw new Error(errorMessage);
   }
 
-  if (expectBlob) return response.blob();
-  return response.json();
+  const result = expectBlob ? await response.blob() : await response.json();
+  if (requestToken !== authToken || requestGeneration !== adminResponseGeneration) throw new Error('登录状态已变化，请重新打开页面。');
+  return result;
 }
 
 function ensureAdminDialog() {
@@ -926,10 +1440,13 @@ function ensureAdminDialog() {
 
   const modal = document.createElement('div');
   modal.id = 'adminActionModal';
-  modal.className = 'fixed inset-0 z-[80] hidden items-center justify-center px-4 py-6 bg-slate-950/60 backdrop-blur-md';
+  modal.className = 'fixed inset-0 z-[80] hidden bg-slate-950/60 backdrop-blur-md';
   modal.innerHTML = `
     <div class="absolute inset-0" style="background: radial-gradient(circle at top, rgba(248,113,113,.25), rgba(15,23,42,.62));" data-admin-modal-close="true"></div>
-    <div class="relative z-[81] flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-[28px] border border-white/10 bg-white shadow-[0_40px_120px_rgba(15,23,42,0.5)]">
+    <div
+      id="adminModalPanel"
+      class="relative z-[81] flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-[28px] border border-white/10 bg-white shadow-[0_40px_120px_rgba(15,23,42,0.5)]"
+    >
       <div class="relative overflow-hidden border-b border-white/10 bg-gradient-to-r from-slate-950 via-slate-900 to-rose-700 px-5 py-5 text-white">
         <div class="absolute inset-0 opacity-40" style="background: radial-gradient(circle at top right, rgba(255,255,255,.22), transparent 38%), radial-gradient(circle at bottom left, rgba(251,191,36,.12), transparent 30%);"></div>
         <div class="relative flex items-start justify-between gap-4">
@@ -1021,12 +1538,14 @@ function buildAdminModalField(field, index) {
   `;
 }
 
-function getAdminModalElements() {
-  ensureAdminDialog();
+function getAdminModalElements(options = {}) {
+  const { ensure = true } = options;
+  if (ensure) ensureAdminDialog();
   const modal = document.getElementById('adminActionModal');
   if (!modal) return null;
   return {
     modal,
+    panel: modal.querySelector('#adminModalPanel'),
     title: modal.querySelector('#adminModalTitle'),
     subtitle: modal.querySelector('#adminModalSubtitle'),
     body: modal.querySelector('#adminModalBody'),
@@ -1038,7 +1557,7 @@ function getAdminModalElements() {
 }
 
 function closeAdminDialog(result = { confirmed: false }) {
-  const elements = getAdminModalElements();
+  const elements = getAdminModalElements({ ensure: false });
   if (elements?.modal) {
     elements.modal.classList.add('hidden');
     elements.modal.classList.remove('flex');
@@ -1087,8 +1606,10 @@ async function openAdminDialog(config = {}) {
     confirmText: config.confirmText || '确认',
     cancelText: config.cancelText || '取消',
     confirmVariant: config.confirmVariant || 'danger',
+    presentation: config.presentation || 'drawer',
   };
   adminDialogState.fields = adminDialogState.config.fields;
+  adminDialogState.presentation = adminDialogState.config.presentation;
 
   elements.title.textContent = adminDialogState.config.title;
   elements.subtitle.textContent = adminDialogState.config.subtitle;
@@ -1102,8 +1623,17 @@ async function openAdminDialog(config = {}) {
       : 'rounded-xl bg-gradient-to-r from-rose-600 to-orange-500 px-4 py-2.5 font-semibold text-white shadow-lg shadow-rose-500/20 transition hover:from-rose-500 hover:to-orange-400';
   clearAdminDialogError();
 
+  if (adminDialogState.presentation === 'modal') {
+    elements.modal.className = 'fixed inset-0 z-[80] hidden items-center justify-center px-4 py-6 bg-slate-950/60 backdrop-blur-md';
+    elements.panel?.classList.remove('h-full', 'max-h-none', 'max-w-xl', 'rounded-none', 'rounded-l-[28px]');
+    elements.panel?.classList.add('max-h-[90vh]', 'max-w-2xl', 'rounded-[28px]');
+  } else {
+    elements.modal.className = 'fixed inset-0 z-[80] hidden flex items-stretch justify-end bg-slate-950/40 backdrop-blur-md';
+    elements.panel?.classList.remove('max-h-[90vh]', 'max-w-2xl', 'rounded-[28px]');
+    elements.panel?.classList.add('h-full', 'max-h-none', 'max-w-xl', 'rounded-none', 'rounded-l-[28px]');
+  }
+
   elements.modal.classList.remove('hidden');
-  elements.modal.classList.add('flex');
   document.body.classList.add('overflow-hidden');
 
   return new Promise((resolve) => {
@@ -1190,6 +1720,7 @@ async function promptText(message, defaultValue = '', options = {}) {
     confirmText: options.confirmText || '确认',
     cancelText: options.cancelText || '取消',
     confirmVariant: options.confirmVariant || 'danger',
+    presentation: options.presentation || 'drawer',
   });
 
   if (!result.confirmed) return null;
@@ -1228,11 +1759,13 @@ async function confirmCriticalAction(actionLabel, reason) {
     confirmText: '确认执行',
     cancelText: '返回修改',
     confirmVariant: 'danger',
+    presentation: 'modal',
   });
   return Boolean(result.confirmed);
 }
 
 function openDetailDrawer(title, html) {
+  clearPrivateProofPreview();
   setText('detailDrawerTitle', title);
   setHtml('detailDrawerBody', html);
   document.getElementById('detailDrawerMask')?.classList.remove('hidden');
@@ -1240,6 +1773,7 @@ function openDetailDrawer(title, html) {
 }
 
 function closeDetailDrawer() {
+  clearPrivateProofPreview();
   document.getElementById('detailDrawerMask')?.classList.add('hidden');
   document.getElementById('detailDrawer')?.classList.add('hidden');
 }
@@ -1364,8 +1898,6 @@ async function login() {
     localStorage.setItem('adminToken', authToken);
     localStorage.setItem('adminUser', JSON.stringify(adminUser));
 
-    await fetchCsrfToken();
-
     // 二次验证管理员权限（兼容老后端返回字段不完整）
     try {
       await apiRequest('/admin/stats');
@@ -1380,8 +1912,70 @@ async function login() {
     showSection('dashboard');
   } catch (error) {
     console.error('登录失败:', error);
+    // 登录响应即使携带 token，也必须在管理员接口二次验证失败时立即丢弃，
+    // 防止普通用户或过期权限会话残留在浏览器存储中。
+    clearAdminSession();
+    renderLoggedOutState({ replaceUrl: false });
     showError(`登录失败: ${error.message}`);
   }
+}
+
+function getAdminRootUrl() {
+  const url = new URL(window.location.href);
+  url.hash = '';
+  // Clean up the legacy override parameter when navigating back to login. It
+  // is intentionally ignored by API resolution and must not look functional.
+  url.searchParams.delete('apiBase');
+  return `${url.pathname}${url.search}` || '/';
+}
+
+function clearAdminSession() {
+  adminResponseGeneration++;
+  clearPrivateProofPreview();
+  clearDeletionReview();
+  clearListingReview();
+  localStorage.removeItem('adminToken');
+  localStorage.removeItem('adminUser');
+  authToken = '';
+  adminUser = null;
+}
+
+function renderLoggedOutState(options = {}) {
+  const { replaceUrl = true, clearEmail = false } = options;
+
+  state.currentSection = 'dashboard';
+  closeDetailDrawer();
+  closeAdminDialog({ confirmed: false });
+  clearSelections();
+  document.body.classList.remove('overflow-hidden');
+
+  document.querySelectorAll('.section').forEach((section) => {
+    section.classList.add('hidden');
+  });
+  document.querySelectorAll('.menu-item').forEach((item) => {
+    item.classList.remove('active');
+  });
+
+  document.getElementById('mainContent')?.classList.add('hidden');
+  document.getElementById('loginModal')?.classList.remove('hidden');
+  setText('adminName', '管理员');
+
+  if (clearEmail) {
+    const emailInput = document.getElementById('loginEmail');
+    if (emailInput) emailInput.value = '';
+  }
+  const passwordInput = document.getElementById('loginPassword');
+  if (passwordInput) passwordInput.value = '';
+
+  if (replaceUrl) {
+    window.history.replaceState({ loggedOut: true }, '', getAdminRootUrl());
+  }
+}
+
+function renderAuthenticatedState() {
+  document.getElementById('loginModal')?.classList.add('hidden');
+  document.getElementById('mainContent')?.classList.remove('hidden');
+  setText('adminName', adminUser?.nickname || adminUser?.email || '管理员');
 }
 
 async function logout() {
@@ -1392,17 +1986,19 @@ async function logout() {
     confirmText: '确认退出',
     cancelText: '取消',
     confirmVariant: 'dark',
+    presentation: 'drawer',
   });
   if (!result.confirmed) return;
-  localStorage.removeItem('adminToken');
-  localStorage.removeItem('adminUser');
-  authToken = '';
-  adminUser = null;
-  location.reload();
+  clearAdminSession();
+  renderLoggedOutState({ replaceUrl: true, clearEmail: true });
 }
 
 async function showSection(sectionName) {
+  if (sectionName !== 'deletionReview') clearDeletionReview();
+  if (sectionName !== 'listingReview') clearListingReview();
   state.currentSection = sectionName;
+  closeDetailDrawer();
+  closeAdminDialog({ confirmed: false });
 
   document.querySelectorAll('.section').forEach((section) => {
     section.classList.add('hidden');
@@ -1424,11 +2020,20 @@ async function showSection(sectionName) {
   clearSelections();
 
   switch (sectionName) {
+    case 'privacyMaintenance':
+      await loadPrivacyMaintenance();
+      break;
+    case 'listingReview':
+      await loadListingReviews();
+      break;
     case 'dashboard':
       await loadDashboard();
       break;
     case 'users':
       await loadUsers(1);
+      break;
+    case 'deletionReview':
+      await loadDeletionRequests(1);
       break;
     case 'reports':
       await loadReports(1);
@@ -1454,6 +2059,9 @@ async function showSection(sectionName) {
     case 'commercialization':
       await loadCommercializationSection();
       break;
+    case 'withdrawals':
+      await loadWithdrawalsSection();
+      break;
     case 'config':
       await loadFeatureFlags();
       break;
@@ -1462,6 +2070,299 @@ async function showSection(sectionName) {
       break;
     default:
       break;
+  }
+}
+
+const deletionReview = { generation: 0, detailGeneration: 0, jobsGeneration: 0, holdsGeneration: 0, cleanupsGeneration: 0, mediaGeneration: 0, uploadsGeneration: 0, cleanups: new Map(), requests: new Map(), controllers: new Set(), policyVersion: '' };
+
+function clearDeletionReview() {
+  erasureGeneration += 1;
+  erasureRows.clear();
+  for (const id of ['erasureRequests', 'erasurePagination']) document.getElementById(id)?.replaceChildren();
+  setText('erasureStatus', '');
+  deletionReview.generation += 1;
+  deletionReview.detailGeneration += 1;
+  deletionReview.jobsGeneration += 1;
+  deletionReview.holdsGeneration += 1;
+  deletionReview.cleanupsGeneration += 1;
+  deletionReview.mediaGeneration += 1;
+  deletionReview.uploadsGeneration += 1;
+  deletionReview.cleanups.clear();
+  deletionReview.requests.clear();
+  deletionReview.policyVersion = '';
+  for (const controller of deletionReview.controllers) controller.abort();
+  deletionReview.controllers.clear();
+  for (const id of ['deletionRequestsList', 'deletionRequestsPagination', 'deletionPlanDetail', 'deletionJobsList', 'deletionJobsPagination', 'retentionHoldsList', 'retentionHoldsPagination', 'contentCleanupsList', 'contentCleanupsPagination', 'contentMediaDetail', 'mediaUploadsList', 'mediaUploadsPagination']) {
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = '';
+  }
+  setText('deletionReviewStatus', '');
+  setText('deletionJobsStatus', '');
+  setText('retentionHoldsStatus', '');
+  setText('contentCleanupsStatus', '');
+  setText('mediaUploadsStatus', '');
+  setText('contentMediaDetail', '');
+}
+
+function deletionReviewMessage(error) {
+  if (error?.message === 'DELETION_DISABLED') return '注销申请登记尚未开放。当前没有执行任何清理。';
+  if (error?.message === 'DELETION_CHANGED') return '申请状态已变化，请刷新申请列表后重新查看。';
+  if (error?.message === 'DELETION_AUTH') return '当前登录已失效或没有核查权限，请重新登录。';
+  if (error?.message === 'DELETION_LIMITED') return '核查请求较多，请稍后重试。';
+  return '暂时无法读取核查信息，请稍后刷新重试。';
+}
+
+async function readDeletionReview(endpoint, token) {
+  // Callers construct only fixed-origin review paths; no payload can supply a URL.
+  const controller = new AbortController();
+  deletionReview.controllers.add(controller);
+  const timeout = setTimeout(() => controller.abort(), 10000);
+  try {
+    const response = await fetch(`${API_BASE_URL}/admin/account-deletion-requests${endpoint}`, {
+      method: 'GET', headers: { Authorization: `Bearer ${token}`, 'Cache-Control': 'no-store' },
+      credentials: 'omit', cache: 'no-store', redirect: 'error', signal: controller.signal,
+    });
+    if (response.status === 401 || response.status === 403) throw new Error('DELETION_AUTH');
+    if (response.status === 404 || response.status === 409) throw new Error('DELETION_CHANGED');
+    if (response.status === 429) throw new Error('DELETION_LIMITED');
+    const data = await response.json();
+    if (!response.ok) {
+      if (data?.code === 'ACCOUNT_DELETION_REQUESTS_DISABLED') throw new Error('DELETION_DISABLED');
+      throw new Error('DELETION_UNAVAILABLE');
+    }
+    return data;
+  } finally {
+    clearTimeout(timeout);
+    deletionReview.controllers.delete(controller);
+  }
+}
+
+const deletionRequestIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const deletionCount = value => Number.isSafeInteger(value) && value >= 0;
+const deletionDate = value => typeof value === 'string' && Number.isFinite(Date.parse(value));
+
+async function loadDeletionRequests(page = 1) {
+  if (!Number.isSafeInteger(page) || page < 1 || page > 10000) return;
+  clearDeletionReview();
+  const token = authToken, generation = deletionReview.generation;
+  if (!token || state.currentSection !== 'deletionReview') return;
+  setText('deletionReviewStatus', '正在读取申请…');
+  try {
+    const data = await readDeletionReview(`?page=${page}`, token);
+    if (token !== authToken || generation !== deletionReview.generation || state.currentSection !== 'deletionReview') return;
+    if (!Array.isArray(data.requests) || data.requests.length > 25 || !deletionCount(data.total)
+      || data.total < data.requests.length || data.page !== page || data.pageSize !== 25 || data.executionEnabled !== false
+      || typeof data.policyVersion !== 'string' || !data.policyVersion || data.policyVersion.length > 80
+      || data.requests.some(row => !row || !deletionRequestIdPattern.test(row.id) || row.status !== 'PENDING_REVIEW'
+        || !Number.isSafeInteger(row.revision) || row.revision < 1 || !deletionDate(row.submittedAt))
+      || new Set(data.requests.map(row => row.id)).size !== data.requests.length) throw new Error('DELETION_INVALID_RESPONSE');
+    deletionReview.policyVersion = data.policyVersion;
+    for (const row of data.requests) deletionReview.requests.set(row.id, { id: row.id, revision: row.revision });
+    const host = document.getElementById('deletionRequestsList');
+    host.innerHTML = data.requests.map(row => `<div class="card flex flex-wrap items-center justify-between gap-3">
+      <div><p class="font-medium">申请 ${escapeHtml(row.id)}</p><p class="text-sm text-gray-600 mt-1">${escapeHtml(formatDateTime(row.submittedAt))} · 待核查</p></div>
+      <button type="button" class="btn-gray" onclick="openDeletionPlan('${row.id}')">查看核查预览</button></div>`).join('');
+    setText('deletionReviewStatus', data.total === 0 ? '目前没有待核查申请。'
+      : data.requests.length === 0 ? '本页已无待核查申请，请刷新列表。' : `共有 ${data.total} 份待核查申请。`);
+    renderPagination('deletionRequestsPagination', page, Math.min(10000, Math.ceil(data.total / 25)), loadDeletionRequests);
+  } catch (error) {
+    if (token !== authToken || generation !== deletionReview.generation || state.currentSection !== 'deletionReview') return;
+    setText('deletionReviewStatus', deletionReviewMessage(error));
+  }
+}
+
+const deletionJobStatusLabels = {
+  QUEUED: '等待处理', RUNNING: '正在处理', BLOCKED: '已暂停，待核查', CANCELLED: '任务已撤回',
+  ONLINE_REMOVED: '线上资料已移除，备份待核实',
+};
+const deletionJobReasonLabels = {
+  RETRY_EXHAUSTED: '多次尝试未完成，需要核查后再处理。', REQUEST_CHANGED: '申请已撤回或版本发生变化。',
+  POLICY_CHANGED: '保留规则已变化，需要重新核查。', ACCOUNT_STATE_CHANGED: '账号状态已变化，需要重新核查。',
+  REAUTHENTICATION_REQUIRED: '需要重新验证账号。', SCOPE_REVIEW_REQUIRED: '存在超出当前处理范围的关联资料。',
+  BACKUP_VERIFICATION_PENDING: '尚未确认备份清除，全部处理尚未完成。', TRANSIENT_RETRY: '暂时未完成，任务已安排稍后重试。',
+};
+async function loadDeletionJobs(page = 1) {
+  if (!Number.isSafeInteger(page) || page < 1 || page > 10000 || !authToken || state.currentSection !== 'deletionReview') return;
+  const token = authToken, generation = deletionReview.generation, jobsGeneration = ++deletionReview.jobsGeneration;
+  const current = () => token === authToken && generation === deletionReview.generation
+    && jobsGeneration === deletionReview.jobsGeneration && state.currentSection === 'deletionReview';
+  document.getElementById('deletionJobsList').innerHTML = '';
+  document.getElementById('deletionJobsPagination').innerHTML = '';
+  setText('deletionJobsStatus', '正在读取任务记录…');
+  try {
+    const data = await readDeletionReview(`/jobs?page=${page}`, token);
+    if (!current()) return;
+    if (data.readOnly !== true || data.executionEnabled !== false || data.page !== page || data.pageSize !== 25
+      || !deletionCount(data.total) || !Array.isArray(data.jobs) || data.jobs.length > 25 || data.total < data.jobs.length
+      || data.jobs.some(job => !job || !deletionRequestIdPattern.test(job.id) || !deletionRequestIdPattern.test(job.requestId)
+        || !Object.prototype.hasOwnProperty.call(deletionJobStatusLabels, job.status)
+        || !Number.isSafeInteger(job.requestRevision) || job.requestRevision < 1
+        || !deletionCount(job.attempts) || job.attempts > 5 || !deletionDate(job.createdAt)
+        || job.overallCompleted !== false || job.backupVerification !== 'PENDING'
+        || (job.status === 'ONLINE_REMOVED' && (!deletionDate(job.onlineRemovedAt) || !deletionDate(job.backupDueAt))))
+      || new Set(data.jobs.map(job => job.id)).size !== data.jobs.length) throw new Error('DELETION_INVALID_RESPONSE');
+    document.getElementById('deletionJobsList').innerHTML = data.jobs.map(job => {
+      const reason = Object.prototype.hasOwnProperty.call(deletionJobReasonLabels, job.reason)
+        ? deletionJobReasonLabels[job.reason] : '处理情况请结合申请核查。';
+      return `<div class="card"><p class="font-medium">${deletionJobStatusLabels[job.status]}</p>
+        <p class="text-sm mt-2">${reason}</p><p class="text-sm text-gray-600 mt-2">申请 ${escapeHtml(job.requestId)} · 版本 ${job.requestRevision}</p>
+        <p class="text-sm text-gray-600 mt-1">${escapeHtml(formatDateTime(job.createdAt))} · 已尝试 ${job.attempts} 次</p>
+        ${job.status === 'ONLINE_REMOVED' ? `<p class="text-sm mt-2">备份处理目标：${escapeHtml(formatDateTime(job.backupDueAt))}（尚未核实完成）</p>` : ''}</div>`;
+    }).join('');
+    setText('deletionJobsStatus', data.total === 0 ? '目前没有处理任务。' : data.jobs.length === 0
+      ? '本页已无任务，请返回上一页。' : `共有 ${data.total} 项任务记录。`);
+    renderPagination('deletionJobsPagination', page, Math.min(10000, Math.ceil(data.total / 25)), loadDeletionJobs);
+  } catch (error) { if (current()) setText('deletionJobsStatus', deletionReviewMessage(error)); }
+}
+
+const holdTargetLabels = { User: '账号资料', Message: '聊天消息', OfferMessage: '议价消息', Item: '商品资料', MovingService: '交接证明', Feedback: '反馈资料' };
+const holdFieldLabels = { nickname: '昵称', bio: '个人介绍', avatarUrl: '头像引用', content: '正文', metadata: '附加资料',
+  title: '标题', description: '说明', images: '图片引用', inspectionProof: '验收证明引用', deliveryProof: '送达证明引用',
+  reproduceSteps: '复现步骤', expectedResult: '预期结果', actualResult: '实际结果', screenshotUrls: '截图引用' };
+const holdTargetFields = { User: ['nickname', 'bio', 'avatarUrl'], Message: ['content'], OfferMessage: ['content', 'metadata'],
+  Item: ['title', 'description', 'images'], MovingService: ['inspectionProof', 'deliveryProof'],
+  Feedback: ['description', 'reproduceSteps', 'expectedResult', 'actualResult', 'screenshotUrls'] };
+const holdReasonLabels = { DISPUTE_EVIDENCE: '案件证据', DOCUMENTED_LEGAL_DUTY: '已登记的法律义务', SECURITY_INCIDENT: '安全事件调查' };
+
+async function loadRetentionHolds(page = 1) {
+  if (!Number.isSafeInteger(page) || page < 1 || page > 10000 || !authToken || state.currentSection !== 'deletionReview') return;
+  const token = authToken, generation = deletionReview.generation, holdsGeneration = ++deletionReview.holdsGeneration;
+  const current = () => token === authToken && generation === deletionReview.generation
+    && holdsGeneration === deletionReview.holdsGeneration && state.currentSection === 'deletionReview';
+  document.getElementById('retentionHoldsList').innerHTML = '';
+  document.getElementById('retentionHoldsPagination').innerHTML = '';
+  setText('retentionHoldsStatus', '正在读取保全登记…');
+  try {
+    const data = await readDeletionReview(`/holds?page=${page}`, token);
+    if (!current()) return;
+    if (data.readOnly !== true || data.executionEnabled !== false || data.externalRegisterVerified !== false
+      || data.page !== page || data.pageSize !== 25 || !deletionCount(data.total) || !Array.isArray(data.holds)
+      || data.holds.length > 25 || data.total < data.holds.length
+      || new Set(data.holds.map(row => row?.id)).size !== data.holds.length
+      || data.holds.some(row => !row || !deletionRequestIdPattern.test(row.id)
+        || !Object.prototype.hasOwnProperty.call(holdTargetLabels, row.targetModel)
+        || !Object.prototype.hasOwnProperty.call(holdReasonLabels, row.reasonCode)
+        || !['ACTIVE', 'RELEASED'].includes(row.status) || typeof row.reviewDue !== 'boolean' || typeof row.ownerAvailable !== 'boolean'
+        || !Number.isSafeInteger(row.revision) || row.revision < 1 || !deletionDate(row.nextReviewAt)
+        || !deletionDate(row.lastReviewedAt) || (row.originalDeadline !== null && !deletionDate(row.originalDeadline))
+        || (row.status === 'ACTIVE' ? row.releasedAt !== null : !deletionDate(row.releasedAt) || row.reviewDue)
+        || !Array.isArray(row.fields) || row.fields.length < 1 || row.fields.length > 5 || new Set(row.fields).size !== row.fields.length
+        || row.fields.some(field => !holdTargetFields[row.targetModel].includes(field))
+        || !Array.isArray(row.fieldAssessments) || row.fieldAssessments.length !== row.fields.length
+        || new Set(row.fieldAssessments.map(value => value?.field)).size !== row.fields.length
+        || row.fieldAssessments.some(value => !value || !row.fields.includes(value.field) || value.executionAuthorized !== false
+          || !['PRESERVE', 'UNKNOWN', 'ASSESS_CLEANUP'].includes(value.state)
+          || (row.status === 'ACTIVE' && value.state !== 'PRESERVE')
+          || (value.state === 'ASSESS_CLEANUP' ? !deletionDate(value.deadline) : value.deadline !== null)))) {
+      throw new Error('DELETION_INVALID_RESPONSE');
+    }
+    document.getElementById('retentionHoldsList').innerHTML = data.holds.map(row => {
+      const status = row.status === 'RELEASED' ? '已解除，待核查后续处理' : row.reviewDue ? '保全中，需要复核' : '保全中';
+      const fields = row.fieldAssessments.map(value => {
+        const timing = value.state === 'PRESERVE' ? (row.status === 'RELEASED' ? '另有有效保全，继续保留' : '继续保留')
+          : value.state === 'UNKNOWN' ? '原到期时间待核实' : `清理核查期限：${escapeHtml(formatDateTime(value.deadline))}（未执行清理）`;
+        return `<li>${holdFieldLabels[value.field]}：${timing}</li>`;
+      }).join('');
+      return `<div class="card"><p class="font-medium">${status} · ${holdTargetLabels[row.targetModel]}</p>
+        <p class="text-sm mt-2">${holdReasonLabels[row.reasonCode]}</p><ul class="text-sm mt-2 space-y-1">${fields}</ul>
+        <p class="text-sm text-gray-600 mt-2">${row.status === 'ACTIVE' ? '下次复核' : '解除时间'}：${escapeHtml(formatDateTime(row.status === 'ACTIVE' ? row.nextReviewAt : row.releasedAt))}</p>
+        ${!row.ownerAvailable && row.status === 'ACTIVE' ? '<p class="text-sm text-amber-800 mt-2">负责人员需要重新指派；保全仍然有效。</p>' : ''}
+        <p class="text-xs text-gray-500 break-all mt-2">登记 ${escapeHtml(row.id)} · 版本 ${row.revision}</p></div>`;
+    }).join('');
+    setText('retentionHoldsStatus', data.total === 0 ? '目前没有系统内保全登记；仍需核对外部案件。'
+      : data.holds.length === 0 ? '本页已无登记，请返回上一页。' : `共有 ${data.total} 项保全登记。复核逾期不会自动解除。`);
+    renderPagination('retentionHoldsPagination', page, Math.min(10000, Math.ceil(data.total / 25)), loadRetentionHolds);
+  } catch (error) { if (current()) setText('retentionHoldsStatus', deletionReviewMessage(error)); }
+}
+
+const deletionReasonLabels = {
+  ACTIVE_RETENTION_HOLDS: '部分资料处于有效保全中，需继续保留；复核逾期不会自动解除。',
+  ACTIVE_ORDERS: '仍有未完成或状态待核实的订单。',
+  ORDER_PROVENANCE_REVIEW: '部分订单的资金来源或历史性质需要核实。',
+  TRANSACTION_END_TIME_REQUIRES_VERIFICATION: '需要核实交易结束时间，才能计算交易记录保留期。',
+  OPEN_CASES_REQUIRE_SCOPED_ASSESSMENT: '存在未结案件，需要确认应保全的具体证据。',
+  OUTSTANDING_VALUE: '存在余额、待处理提现或其他权益。',
+  GOVERNANCE_RELATIONSHIPS: '存在管理权限、限制状态或治理关联。',
+  PROVIDER_REVOCATION_REQUIRED: '需要完成第三方登录授权撤销。',
+  FINANCIAL_BASIS_REVIEW: '需要确认哪些记录属于依法应保留的账务。',
+  FULFILLMENT_AND_MEDIA_REVIEW: '存在履约、寄存或交接资料，需要核实关联与归属。',
+};
+
+function deletionPlanMarkup(plan, receipt) {
+  const groups = [
+    ['账号及个人设置', ['User', 'UserBlock', 'DeviceToken', 'UserNotificationPreference', 'KeywordSubscription', 'ShoppingList', 'PasswordRecoveryGrant']],
+    ['商品与估价资料', ['Item', 'ItemValuation', 'PriceValuationRecord']],
+    ['聊天与议价消息', ['Message', 'OfferMessage']],
+    ['交易与议价', ['Order', 'Trade', 'Offer']],
+    ['账务及相关流水', ['WalletLog', 'Transaction', 'WithdrawalRequest', 'PaymentRecord', 'PaymentRefund', 'Settlement', 'PaymentWebhookEvent']],
+    ['反馈、举报与评价', ['Feedback', 'FeedbackReward', 'Report', 'Review']],
+    ['履约、寄存与交接', ['MovingService', 'StorageOrder', 'StoragePhoto', 'DeliveryDispute']],
+    ['管理与通知记录', ['AdminLog', 'DeliveryAuditLog', 'PushNotificationLog', 'KeywordMatchNotification']],
+    ['会话、收藏与浏览关联', ['Conversation', 'Favorite', 'ViewHistory']],
+    ['注销申请与处理记录', ['AccountDeletionRequest', 'AccountDeletionJob', 'AccountDeletionTombstone']],
+    ['保全登记与核查记录', ['RetentionHold', 'RetentionHoldEvent']],
+    ['消息清理与待核查图片', ['MessageContentCleanup', 'OfferMessageContentCleanup', 'DetachedMediaReference']],
+    ['图片上传、引用与核验登记', ['MediaUpload', 'MediaReference', 'MediaVerification']],
+  ];
+  if (!plan || plan.readOnly !== true || plan.executionEnabled !== false || plan.assessment !== 'PREVIEW_ONLY'
+    || plan.request?.id !== receipt.id || plan.request?.revision !== receipt.revision || plan.request?.status !== 'PENDING_REVIEW'
+    || plan.policyVersion !== deletionReview.policyVersion || !deletionDate(plan.generatedAt)
+    || !plan.records || groups.some(([, keys]) => keys.some(key => !deletionCount(plan.records[key])))
+    || !Array.isArray(plan.reviewReasons) || plan.reviewReasons.length > 30
+    || plan.reviewReasons.some(reason => typeof reason !== 'string')
+    || !deletionCount(plan.ordinaryMessages?.authored) || !deletionCount(plan.ordinaryMessages?.pastOperationalWindow)
+    || !deletionCount(plan.ordinaryMessages?.otherParticipantMessages) || plan.ordinaryMessages?.deletionAuthorized !== false) {
+    throw new Error('DELETION_INVALID_RESPONSE');
+  }
+  const rows = groups.map(([label, keys]) => {
+    const total = keys.reduce((sum, key) => sum + plan.records[key], 0);
+    if (!deletionCount(total)) throw new Error('DELETION_INVALID_RESPONSE');
+    return `<tr><td class="td">${label}</td><td class="td">${total}</td></tr>`;
+  }).join('');
+  const reasons = plan.reviewReasons.length
+    ? `<ul class="list-disc pl-5 space-y-2">${plan.reviewReasons.map(reason => `<li>${escapeHtml(deletionReasonLabels[reason] || '存在其他待核查事项。')}</li>`).join('')}</ul>`
+    : '<p>当前结构化记录未发现上述待核查事项；图片归属、法律保全和备份仍需另外核实。</p>';
+  return `<div class="card"><h3 class="text-xl font-semibold">资料范围与待核查事项</h3>
+    <p class="text-sm break-all mt-2">申请 ${escapeHtml(receipt.id)}</p>
+    <p class="text-sm text-gray-600 mt-2">核查时间：${escapeHtml(formatDateTime(plan.generatedAt))} · 规则：${escapeHtml(plan.policyVersion)}</p>
+    <p class="mt-3 text-sm">以下数量包括共享和关联记录，不代表将删除的数量。当前未安排清理，也未确认任何法律保全、图片归属或备份处理已完成。</p>
+    <div class="overflow-x-auto mt-4"><table class="w-full text-left"><thead><tr><th class="th">资料类别</th><th class="th">关联记录数</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <p class="text-sm mt-3">本人普通消息 ${plan.ordinaryMessages.authored} 条，其中超过常规保留期 ${plan.ordinaryMessages.pastOperationalWindow} 条；其他参与者消息 ${plan.ordinaryMessages.otherParticipantMessages} 条。到期不代表已获准删除。</p>
+    <h4 class="font-semibold mt-5 mb-3">后续处理前需要核实</h4>${reasons}
+    ${deletionFieldPlanMarkup(plan.fieldPlan)}
+    <p class="text-sm text-gray-600 mt-4">实际清理还需完成字段处理、图片共享引用保护、第三方撤销和备份恢复验证。</p></div>`;
+}
+
+function deletionFieldPlanMarkup(plan) {
+  if (!plan || plan.executionAuthorized !== false || !Array.isArray(plan.rules) || plan.rules.length > 20) return '';
+  const actions = {
+    REMOVE_DIRECT_IDENTIFIERS: '移除昵称、联系方式等直接身份资料', REVOKE_ACCESS_AND_REMOVE_CREDENTIALS: '撤销登录并移除凭据',
+    REVOKE_PROVIDER_THEN_UNLINK: '确认第三方授权撤销后再解除关联', CLEAR_OWN_ORDINARY_CONTENT: '清理本人普通消息正文',
+    PARTITION_SHARED_FACTS_AND_PERSONAL_TEXT: '区分共享交易事实与个人文字', DETACH_THEN_REMOVE_UNSHARED_OWNED_OBJECT: '核查图片引用后再处理对象',
+    VERIFY_THEN_RETIRE_UNSUBMITTED_OBJECT: '核查未提交附件后按期处理', PARTITION_CASE_EVIDENCE_AND_PUBLIC_ATTRIBUTION: '区分案件证据与公开身份信息',
+    MINIMIZE_AND_RETAIN_ONLY_REQUIRED_FINANCIAL_FACTS: '只保留有明确依据的必要财务事实', SETTLE_OBLIGATIONS_THEN_MINIMIZE: '先处理履约义务再减少资料',
+    EXPIRE_MINIMAL_RECEIPT: '按期处理最小化申请回执', SUPPRESS_RESTORE_UNTIL_BACKUP_PROOF: '核实备份前保留防恢复记录',
+  };
+  return `<h4 class="font-semibold mt-5 mb-3">分项处理范围</h4><ul class="list-disc pl-5 space-y-2">${plan.rules
+    .map(rule => `<li>${escapeHtml(actions[rule.action] || '需要另行核查的资料')}。尚不代表已获准执行或已经完成。</li>`).join('')}</ul>`;
+}
+
+async function openDeletionPlan(requestId) {
+  const receipt = deletionReview.requests.get(requestId);
+  if (!receipt || !authToken || state.currentSection !== 'deletionReview') return;
+  const token = authToken, generation = deletionReview.generation, detailGeneration = ++deletionReview.detailGeneration;
+  const host = document.getElementById('deletionPlanDetail');
+  host.textContent = '正在核查资料范围…';
+  try {
+    const response = await readDeletionReview(`/${receipt.id}/plan?revision=${receipt.revision}`, token);
+    if (token !== authToken || generation !== deletionReview.generation || detailGeneration !== deletionReview.detailGeneration
+      || state.currentSection !== 'deletionReview') return;
+    if (response.code !== 'ACCOUNT_DELETION_PLAN_PREVIEW') throw new Error('DELETION_INVALID_RESPONSE');
+    host.innerHTML = deletionPlanMarkup(response.plan, receipt);
+  } catch (error) {
+    if (token !== authToken || generation !== deletionReview.generation || detailGeneration !== deletionReview.detailGeneration
+      || state.currentSection !== 'deletionReview') return;
+    host.textContent = deletionReviewMessage(error);
   }
 }
 
@@ -1494,6 +2395,8 @@ async function loadDashboard() {
     setText('pinRevenue', formatMoney(stats.pinRevenue || 0));
     setText('membershipRevenue', formatMoney(stats.membershipRevenue || 0));
     setText('offlineServicePendingCount', stats.offlineServicePendingCount || 0);
+    setText('pendingWithdrawals', stats.pendingWithdrawals || 0);
+    setText('pendingWithdrawalAmount', formatMoney(stats.pendingWithdrawalAmount || 0));
 
     const todos = stats.todos || {};
     const todoHtml = `
@@ -1503,12 +2406,15 @@ async function loadDashboard() {
       <button onclick="openSectionWithPreset('items', 'pendingReview')" class="w-full text-left border rounded p-2 hover:bg-gray-50">待审核商品：${todos.pendingReviewItems || 0}</button>
       <button onclick="openSectionWithPreset('offline', 'pending')" class="w-full text-left border rounded p-2 hover:bg-gray-50">待处理线下服务：${todos.pendingOfflineServices || 0}</button>
       <button onclick="openSectionWithPreset('orders', 'pendingDispute')" class="w-full text-left border rounded p-2 hover:bg-gray-50">待处理取消订单：${todos.pendingCancelOrders || 0}</button>
+      <button onclick="openSectionWithPreset('withdrawals', 'pending')" class="w-full text-left border rounded p-2 hover:bg-gray-50">待处理提现：${todos.pendingWithdrawals || 0}</button>
       <button onclick="openSectionWithPreset('commercialization', 'paymentExceptions')" class="w-full text-left border rounded p-2 hover:bg-gray-50">置顶支付异常：${todos.paymentExceptions || 0}</button>
       <button onclick="openSectionWithPreset('feedbacks', 'highPriorityBug')" class="w-full text-left border rounded p-2 hover:bg-gray-50">高优先级 Bug：${todos.highPriorityBugs || 0}</button>
     `;
     setHtml('dashboardTodos', todoHtml);
   } catch (error) {
-    showError(`加载统计失败: ${error.message}`);
+    const message = recoverableLoadMessage('运营统计', error);
+    showError(message);
+    renderRecoverableLoadError('dashboardTodos', message, loadDashboard);
   }
 }
 
@@ -1570,18 +2476,11 @@ async function loadUsers(page = 1) {
             ? `<img src="${escapeHtml(resolveImageUrl(user.avatarUrl))}" class="w-9 h-9 rounded-full object-cover border border-gray-200" />`
             : '<div class="w-9 h-9 rounded-full bg-gray-100 text-gray-500 flex items-center justify-center text-xs">NA</div>';
 
-          const actionBtn = user.isAdmin
-            ? '<span class="action-btn action-btn-amber">管理员</span>'
-            : `<button onclick="toggleUserBan(${user.id}, ${!user.isBanned})" class="action-btn ${
-                user.isBanned ? 'action-btn-green' : 'action-btn-red'
-              }">${
-                user.isBanned ? '解封' : '封禁'
-              }</button>`;
-
           return `
             <tr>
               <td class="td">
                 <input
+                  aria-label="选择用户 ${user.id}"
                   type="checkbox"
                   class="user-checkbox"
                   ${checked ? 'checked' : ''}
@@ -1600,12 +2499,46 @@ async function loadUsers(page = 1) {
               <td class="td">${formatDate(user.createdAt)}</td>
               <td class="td">${statusTag}</td>
               <td class="td">
-                <div class="flex items-center gap-2">
-                  <button onclick="openUserDetail(${user.id})" class="action-btn action-btn-blue">详情</button>
-                  <button onclick="changeUserRole(${user.id}, '${user.isAdmin ? 'admin' : 'user'}')" class="action-btn action-btn-blue">角色</button>
-                  <button onclick="changeUserPublishPermission(${user.id}, '${(user.publishPermission?.status || 'ACTIVE')}')" class="action-btn action-btn-amber">发布权限</button>
-                  <button onclick="addUserAdminNote(${user.id})" class="action-btn action-btn-blue">备注</button>
-                  ${actionBtn}
+                <div class="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    aria-label="查看用户 ${user.id} 详情"
+                    title="查看详情"
+                    onclick="openUserDetail(${user.id})"
+                    class="action-btn action-btn-blue"
+                  >详情</button>
+                  <button
+                    type="button"
+                    aria-label="修改用户 ${user.id} 角色"
+                    title="修改角色"
+                    onclick="changeUserRole(${user.id}, '${user.isAdmin ? 'admin' : 'user'}')"
+                    class="action-btn action-btn-blue"
+                  >角色</button>
+                  <button
+                    type="button"
+                    aria-label="修改用户 ${user.id} 的发布权限"
+                    title="修改发布权限"
+                    onclick="changeUserPublishPermission(${user.id}, '${(user.publishPermission?.status || 'ACTIVE')}')"
+                    class="action-btn action-btn-amber"
+                  >发布权限</button>
+                  <button
+                    type="button"
+                    aria-label="添加用户 ${user.id} 管理员备注"
+                    title="添加备注"
+                    onclick="addUserAdminNote(${user.id})"
+                    class="action-btn action-btn-blue"
+                  >备注</button>
+                  ${user.isAdmin
+                    ? '<span class="action-btn action-btn-amber" aria-label="管理员账号，不能封禁">管理员</span>'
+                    : `
+                      <button
+                        type="button"
+                        aria-label="${user.isBanned ? `解封用户 ${user.id}` : `封禁用户 ${user.id}`}"
+                        title="${user.isBanned ? '解封用户' : '封禁用户'}"
+                        onclick="toggleUserBan(${user.id}, ${!user.isBanned})"
+                        class="action-btn ${user.isBanned ? 'action-btn-green' : 'action-btn-red'}"
+                      >${user.isBanned ? '解封' : '封禁'}</button>
+                    `}
                 </div>
               </td>
             </tr>
@@ -1616,7 +2549,9 @@ async function loadUsers(page = 1) {
 
     renderPagination('usersPagination', page, data.totalPages || 1, loadUsers);
   } catch (error) {
-    showError(`加载用户失败: ${error.message}`);
+    const message = recoverableLoadMessage('用户列表', error);
+    showError(message);
+    renderRecoverableLoadError('usersList', message, () => loadUsers(page), { tableColumnCount: 13 });
   }
 }
 
@@ -1864,80 +2799,19 @@ function feedbackRewardBadge(rewardStatus) {
   return `<span class="px-2 py-1 rounded text-xs ${cls}">${escapeHtml(value || 'none')}</span>`;
 }
 
-function getOrderNextActions(status) {
-  const normalized = String(status || '').toUpperCase();
-  if (normalized === 'PENDING') return ['PAID', 'CANCELED', 'FAILED'];
-  if (normalized === 'PAID') return ['SHIPPED', 'CANCELED', 'DISPUTED', 'REFUNDED'];
-  if (normalized === 'SHIPPED') return ['COMPLETED', 'DISPUTED', 'REFUNDED'];
-  if (normalized === 'DISPUTED') return ['REFUNDED', 'COMPLETED'];
-  return [];
-}
-
-function orderStatusActionLabel(status) {
-  const map = {
-    PAID: '确认支付',
-    SHIPPED: '标记发货',
-    COMPLETED: '标记完成',
-    CANCELED: '标记取消',
-    DISPUTED: '标记纠纷',
-    REFUNDED: '标记退款',
-    FAILED: '标记失败',
-  };
-  return map[String(status || '').toUpperCase()] || String(status || '').toUpperCase();
-}
-
-function orderStatusActionButtonClass(status) {
-  const normalized = String(status || '').toUpperCase();
-  if (normalized === 'PAID' || normalized === 'SHIPPED' || normalized === 'COMPLETED') return 'btn-gray';
-  return 'btn-red';
-}
-
 function renderOrderActionButtons(order) {
-  const actions = getOrderNextActions(order.status);
-  if (!actions.length) {
-    return '<span class="text-xs text-gray-500">当前状态无需后台操作</span>';
+  const status = String(order?.status || '').toUpperCase();
+  if (status === 'PAID' || status === 'SHIPPED') {
+    return `<button onclick="openOrderDispute(${order.id})" class="btn-red">转入纠纷处理</button>`;
   }
-
-  return actions
-    .map(
-      (action) =>
-        `<button onclick="setOrderStatus(${order.id}, '${action}')" class="${orderStatusActionButtonClass(action)}">${orderStatusActionLabel(action)}</button>`
-    )
-    .join('');
-}
-
-function getStorageNextActions(status) {
-  const normalized = String(status || '').toUpperCase();
-  if (normalized === 'PENDING') return ['ACTIVE'];
-  if (normalized === 'ACTIVE') return ['COMPLETED', 'EXPIRED'];
-  return [];
-}
-
-function storageStatusActionLabel(status) {
-  const map = {
-    ACTIVE: '激活',
-    COMPLETED: '完成',
-    EXPIRED: '过期',
-  };
-  return map[String(status || '').toUpperCase()] || String(status || '').toUpperCase();
-}
-
-function storageStatusActionButtonClass(status) {
-  return String(status || '').toUpperCase() === 'ACTIVE' ? 'btn-gray' : 'btn-red';
+  if (status === 'DISPUTED') {
+    return '<span class="text-xs text-amber-700">请在纠纷工作台使用具名处理动作</span>';
+  }
+  return '<span class="text-xs text-gray-500">订单状态由买家流程或受审计的纠纷流程管理</span>';
 }
 
 function renderStorageActionButtons(order) {
-  const actions = getStorageNextActions(order.status);
-  if (!actions.length) {
-    return '<span class="text-xs text-gray-500">当前状态无需后台操作</span>';
-  }
-
-  return actions
-    .map(
-      (action) =>
-        `<button onclick="updateStorageStatus(${order.id}, '${action}')" class="${storageStatusActionButtonClass(action)}">${storageStatusActionLabel(action)}</button>`
-    )
-    .join('');
+  return '<span class="text-xs text-gray-500">当前 V1 对仓储记录仅提供只读查看</span>';
 }
 
 async function loadReports(page = 1) {
@@ -2010,7 +2884,6 @@ async function loadReports(page = 1) {
             ${renderReportEvidenceImages(report)}
             <div class="flex flex-wrap gap-2 mt-3">
               <button onclick="openReportDetail(${report.id})" class="btn-gray">详情</button>
-              <button onclick="updateReportStatus(${report.id})" class="btn-gray">改状态</button>
               <button onclick="assignReport(${report.id})" class="btn-gray">指派</button>
               <button onclick="resolveReport(${report.id}, 'DELETE_CONTENT')" class="btn-red">删除内容</button>
               <button onclick="resolveReport(${report.id}, 'BAN_USER')" class="btn-red">封禁用户</button>
@@ -2025,7 +2898,9 @@ async function loadReports(page = 1) {
     renderPagination('reportsPagination', page, data.totalPages || 1, loadReports);
     updateSelectionCount();
   } catch (error) {
-    showError(`加载举报失败: ${error.message}`);
+    const message = recoverableLoadMessage('举报列表', error);
+    showError(message);
+    renderRecoverableLoadError('reportsList', message, () => loadReports(page));
   }
 }
 
@@ -2132,21 +3007,16 @@ async function openReportDetail(reportId) {
     const report = data.report;
     const target = data.target;
     const logs = data.logs || [];
-    const evidenceImages = Array.isArray(report.evidenceImages) ? report.evidenceImages : [];
-
-    const evidenceHtml = evidenceImages.length
-      ? `<div class="flex gap-2 flex-wrap">${
-          evidenceImages
-            .map((url) => `<a href="${escapeHtml(resolveImageUrl(url))}" target="_blank" rel="noreferrer">
-              <img src="${escapeHtml(resolveImageUrl(url))}" class="w-20 h-20 rounded object-cover border" />
-            </a>`)
-            .join('')
-        }</div>`
-      : '<p class="text-gray-500">无证据图片</p>';
+    const evidenceHtml = renderReportEvidenceImages(report) || '<p class="text-gray-500">无证据图片</p>';
 
     const logsHtml = logs.length
       ? `<ul class="list-disc pl-5">${logs
-          .map((log) => `<li>${formatDateTime(log.createdAt)} · ${escapeHtml(log.action)} · ${escapeHtml(log.admin?.nickname || maskEmail(log.admin?.email) || '-')}</li>`)
+          .map((log) => {
+            const auditDetails = formatReportAuditDetails(log.details);
+            return `<li>${formatDateTime(log.createdAt)} · ${escapeHtml(log.action)} · ${escapeHtml(
+              log.admin?.nickname || maskEmail(log.admin?.email) || '-'
+            )}${auditDetails ? ` · ${auditDetails}` : ''}</li>`;
+          })
           .join('')}</ul>`
       : '<p class="text-gray-500">暂无日志</p>';
 
@@ -2180,33 +3050,27 @@ async function openReportDetail(reportId) {
   }
 }
 
-async function updateReportStatus(reportId) {
-  const status = (await promptText('输入状态（pending/reviewing/valid/invalid/duplicate/resolved/closed）', 'reviewing', {
-    title: '更新举报状态',
-    label: '状态',
-    confirmText: '继续',
-    confirmVariant: 'dark',
-  })) || '';
-  if (!status) return;
-  const priority = ((await promptText('输入优先级（LOW/MEDIUM/HIGH）', 'MEDIUM', {
-    title: '更新举报状态',
-    label: '优先级',
-    confirmText: '继续',
-    confirmVariant: 'dark',
-  })) || '').toUpperCase();
-  const reason = await promptReason('更新举报状态', true);
-  if (reason === null) return;
-  if (!(await confirmCriticalAction(`更新举报状态为 ${status}`, reason))) return;
+function formatReportAuditDetails(details) {
+  if (!details || typeof details !== 'object') return '';
 
-  try {
-    await apiRequest(`/admin/reports/${reportId}/status`, {
-      method: 'PATCH',
-      body: JSON.stringify({ status, priority, reason }),
-    });
-    await loadReports(state.currentPage.reports);
-  } catch (error) {
-    showError(`更新举报状态失败: ${error.message}`);
+  const parts = [];
+  if (details.reason) parts.push(`原因：${details.reason}`);
+  if (details.previousStatus || details.nextStatus) {
+    parts.push(`举报状态：${details.previousStatus || '-'} → ${details.nextStatus || '-'}`);
   }
+
+  const effect = details.effect;
+  if (effect?.kind === 'ITEM_WITHDRAWN') {
+    parts.push(`商品状态：${effect.previousStatus || '-'} → ${effect.nextStatus || '-'}`);
+  } else if (effect?.kind === 'USER_BANNED') {
+    parts.push(
+      `用户封禁：${effect.previousState?.isBanned ? '已封禁' : '正常'} → ${
+        effect.nextState?.isBanned ? '已封禁' : '正常'
+      }`
+    );
+  }
+
+  return parts.map((part) => escapeHtml(part)).join(' · ');
 }
 
 async function batchResolveReports(action) {
@@ -2306,12 +3170,12 @@ async function loadFeedbacks(page = 1) {
             ${latestReward}
 
             <div class="flex flex-wrap gap-2 mt-3">
-              <button onclick="openFeedbackDetail(${feedback.id})" class="btn-gray">详情</button>
-              <button onclick="updateFeedbackStatus(${feedback.id}, '${escapeHtml(feedback.status)}', '${escapeHtml(
+              <button type="button" aria-label="查看反馈 ${feedback.id} 详情" onclick="openFeedbackDetail(${feedback.id})" class="btn-gray">详情</button>
+              <button type="button" aria-label="修改反馈 ${feedback.id} 状态和优先级" onclick="updateFeedbackStatus(${feedback.id}, '${escapeHtml(feedback.status)}', '${escapeHtml(
           feedback.priority
         )}')" class="btn-gray">改状态/优先级</button>
-              <button onclick="replyFeedback(${feedback.id})" class="btn-gray">管理员回复</button>
-              <button onclick="rewardFeedback(${feedback.id})" class="btn-red">发放奖励</button>
+              <button type="button" aria-label="管理员回复反馈 ${feedback.id}" onclick="replyFeedback(${feedback.id})" class="btn-gray">管理员回复</button>
+              <button type="button" aria-label="发放反馈 ${feedback.id} 奖励" onclick="rewardFeedback(${feedback.id})" class="btn-red">发放奖励</button>
             </div>
           </div>
         `;
@@ -2337,9 +3201,14 @@ async function openFeedbackDetail(feedbackId) {
           <p class="font-semibold mb-1">截图（${screenshots.length}）</p>
           <div class="flex gap-2 flex-wrap">
             ${screenshots
-              .map((url) => `<a href="${escapeHtml(url)}" target="_blank" rel="noreferrer">
-                <img src="${escapeHtml(url)}" class="w-20 h-20 object-cover rounded border border-gray-200" />
-              </a>`)
+              .map((url) => {
+                const src = resolveImageUrl(url);
+                return src
+                  ? `<a href="${escapeHtml(src)}" target="_blank" rel="noreferrer">
+                      <img src="${escapeHtml(src)}" class="w-20 h-20 object-cover rounded border border-gray-200" />
+                    </a>`
+                  : '';
+              })
               .join('')}
           </div>
         </div>`
@@ -2482,19 +3351,19 @@ async function replyFeedback(feedbackId) {
 }
 
 async function rewardFeedback(feedbackId) {
-  const rewardType = ((await promptText(
-    '奖励类型（PIN_CREDIT / COUPON / MEMBERSHIP_DAYS / POINTS / BALANCE / NONE）',
-    'NONE',
-    {
-      title: '发放反馈奖励',
-      label: '奖励类型',
-      confirmText: '继续',
-      confirmVariant: 'dark',
-    }
-  )) || '').toUpperCase();
+  const rewardType = normalizeFeedbackRewardType((await promptText(paymentsAreEnabled() ? '奖励类型（不发放 / 置顶 / 代金券 / 会员天数 / 积分 / 余额）' : '奖励类型（不发放 / 置顶 / 代金券 / 会员天数 / 积分；余额暂未开放）', '不发放', {
+    title: '发放反馈奖励',
+    label: '奖励类型',
+    confirmText: '继续',
+    confirmVariant: 'dark',
+  })) || '不发放');
   if (!rewardType) return;
+  if (rewardType === 'BALANCE' && !paymentsAreEnabled()) {
+    showError(paymentsUnavailableMessage);
+    return;
+  }
 
-  const rewardValue = (await promptText('奖励值（例如 PIN_24H / 7 / 100 / 10.00，可选）', '', {
+  const rewardValue = (await promptText('奖励值（例如 24h / 7 / 100 / 10.00，可选）', '', {
     title: '发放反馈奖励',
     label: '奖励值',
     required: false,
@@ -2622,7 +3491,9 @@ async function loadItems(page = 1) {
     renderPagination('itemsPagination', page, data.totalPages || 1, loadItems);
     updateSelectionCount();
   } catch (error) {
-    showError(`加载商品失败: ${error.message}`);
+    const message = recoverableLoadMessage('商品列表', error);
+    showError(message);
+    renderRecoverableLoadError('itemsList', message, () => loadItems(page));
   }
 }
 
@@ -2853,7 +3724,9 @@ async function loadOrders(page = 1) {
 
     renderPagination('ordersPagination', page, data.totalPages || 1, loadOrders);
   } catch (error) {
-    showError(`加载订单失败: ${error.message}`);
+    const message = recoverableLoadMessage('订单列表', error);
+    showError(message);
+    renderRecoverableLoadError('ordersList', message, () => loadOrders(page));
   }
 }
 
@@ -2898,22 +3771,20 @@ async function openOrderDetail(orderId) {
   }
 }
 
-async function setOrderStatus(orderId, status) {
-  const reason = await promptReason(`更新订单 #${orderId} 状态为 ${status}`, true);
+async function openOrderDispute(orderId) {
+  const reason = await promptReason(`将订单 #${orderId} 转入争议处理`, true);
   if (reason === null) return;
-  if (!(await confirmCriticalAction(`更新订单状态为 ${status}`, reason))) return;
+  if (!(await confirmCriticalAction(`开启订单争议 #${orderId}`, reason))) return;
 
   try {
-    await apiRequest(`/admin/orders/${orderId}/status`, {
+    await apiRequest(`/admin/disputes/orders/${orderId}/open`, {
       method: 'PATCH',
-      body: JSON.stringify({ status, reason }),
+      body: JSON.stringify({ reason }),
     });
     await loadOrders(state.currentPage.orders);
-    if (state.currentSection === 'disputes') {
-      await loadDisputes(state.currentPage.disputes);
-    }
+    await loadDisputes(state.currentPage.disputes);
   } catch (error) {
-    showError(`更新订单状态失败: ${error.message}`);
+    showError(`开启订单争议失败: ${error.message}`);
   }
 }
 
@@ -2953,7 +3824,7 @@ async function loadTransactions(page = 1) {
             <tr>
               <td class="td">${escapeHtml(tx.ledgerId || String(tx.id || '-'))}</td>
               <td class="td">${escapeHtml(tx.source || '-')}<br /><span class="text-xs text-gray-500">${escapeHtml(
-            tx.paymentChannel || '-'
+            formatPaymentChannelLabel(tx.paymentChannel)
           )}</span></td>
               <td class="td">${tx.type}</td>
               <td class="td">${formatMoney(tx.amount)}</td>
@@ -3025,7 +3896,15 @@ async function loadDisputes(page = 1) {
 
     const ordersHtml = (data.canceledOrders || [])
       .map(
-        (order) => `
+        (order) => {
+          const actionsHtml = renderDisputeOrderActions(order);
+          const issuesHtml = (order.feedbacks || []).map((issue) => `
+            <div class="border rounded p-2 my-2">
+              <p class="text-sm font-semibold">自取问题 #${Number(issue.id)} · ${issue.userId === order.buyerId ? '买家' : '卖家'} · ${escapeHtml(issue.status)}</p>
+              <p class="text-sm whitespace-pre-wrap">${escapeHtml(issue.description || '')}</p>
+              ${issue.adminReply ? `<p class="text-xs">处理回复：${escapeHtml(issue.adminReply)}</p>` : ''}
+            </div>`).join('');
+          return `
           <div class="card">
             <div class="flex justify-between items-start gap-3 mb-2">
               <div>
@@ -3041,17 +3920,18 @@ async function loadDisputes(page = 1) {
               </div>
             </div>
             <p class="text-xs text-gray-600 mb-2">负责人：${escapeHtml(order.assignment?.assigneeName || '未指派')}</p>
+            ${issuesHtml}
             <div class="flex gap-2 flex-wrap">
               <button onclick="assignDisputeOrder(${order.id})" class="btn-gray">指派</button>
-              <button onclick="resolveDisputeOrder(${order.id}, 'MARK_COMPLETED')" class="btn-red">改为完成</button>
-              <button onclick="resolveDisputeOrder(${order.id}, 'KEEP_CANCELED')" class="btn-gray">保持取消</button>
+              ${actionsHtml}
             </div>
           </div>
-        `
+        `;
+        }
       )
       .join('');
 
-    setHtml('disputesOrdersList', ordersHtml || '<div class="card text-gray-500 text-center">暂无取消订单纠纷</div>');
+    setHtml('disputesOrdersList', ordersHtml || '<div class="card text-gray-500 text-center">暂无订单纠纷</div>');
 
     const refundsHtml = (data.refunds || [])
       .map(
@@ -3070,8 +3950,33 @@ async function loadDisputes(page = 1) {
 
     renderPagination('disputesPagination', page, data.totalPages || 1, loadDisputes);
   } catch (error) {
-    showError(`加载纠纷失败: ${error.message}`);
+    const message = recoverableLoadMessage('订单纠纷', error);
+    showError(message);
+    renderRecoverableLoadError('disputesReportsList', message, () => loadDisputes(page));
+    renderRecoverableLoadError('disputesOrdersList', message, () => loadDisputes(page));
+    renderRecoverableLoadError('disputesRefundsList', message, () => loadDisputes(page));
   }
+}
+
+function renderDisputeOrderActions(order) {
+  const actionDefinitions = {
+    MARK_COMPLETED: { label: '核验后完成', className: 'btn-red' },
+    CLOSE_CANCELED: { label: '取消结案（不执行退款）', className: 'btn-red' },
+    KEEP_DISPUTED: { label: '保持争议', className: 'btn-gray' },
+    KEEP_CANCELED: { label: '保持取消', className: 'btn-gray' },
+  };
+  const orderId = Number(order?.id);
+  const allowedActions = Array.isArray(order?.allowedActions) ? order.allowedActions : [];
+
+  if (!Number.isInteger(orderId) || orderId <= 0) return '';
+
+  return allowedActions
+    .filter((action) => Object.prototype.hasOwnProperty.call(actionDefinitions, action))
+    .map((action) => {
+      const definition = actionDefinitions[action];
+      return `<button onclick="resolveDisputeOrder(${orderId}, '${action}')" class="${definition.className}">${definition.label}</button>`;
+    })
+    .join('');
 }
 
 async function assignDisputeOrder(orderId) {
@@ -3131,9 +4036,20 @@ async function assignDisputeOrder(orderId) {
 }
 
 async function resolveDisputeOrder(orderId, action) {
-  const actionLabel = action === 'MARK_COMPLETED' ? '将取消订单改为已完成' : '保持订单为已取消';
+  const actionLabel =
+    action === 'MARK_COMPLETED'
+      ? '核验后完成争议订单'
+      : action === 'CLOSE_CANCELED'
+        ? '取消结案（请填写给双方的处理说明；不执行退款，已声明付款的商品不会自动重新出售）'
+      : action === 'KEEP_DISPUTED'
+        ? '保持订单为争议中'
+        : '保持订单为已取消';
   const reason = await promptReason(actionLabel, true);
   if (reason === null) return;
+  if (action === 'CLOSE_CANCELED' && (reason.trim().length < 5 || reason.trim().length > 1000)) {
+    showError('请填写 5–1000 个字的处理说明。');
+    return;
+  }
   if (!(await confirmCriticalAction(actionLabel, reason))) return;
 
   try {
@@ -3150,7 +4066,7 @@ async function resolveDisputeOrder(orderId, action) {
 }
 
 async function loadOfflineSection() {
-  await Promise.all([loadOfflineOverview(), loadMovingServices(1), loadStorageOrders(1), loadRecycleConsign()]);
+  await Promise.all([loadFeatureFlags(), loadOfflineOverview(), loadMovingServices(1), loadStorageOrders(1), loadRecycleConsign()]);
 }
 
 async function loadOfflineOverview() {
@@ -3213,11 +4129,34 @@ function isPlatformMovingServiceRecord(service, meta) {
   );
 }
 
+function isPlatformDeliveryManualHandlingState(service, meta) {
+  return false;
+}
+
+function isPlatformDeliveryFrozenState(service, meta) {
+  if (!isPlatformMovingServiceRecord(service, meta) || state.featureFlags.platformDeliveryEnabled) return false;
+  return true;
+}
+
 function deliveryPayerLabel(payer) {
   const normalized = String(payer || '').toUpperCase();
   if (normalized === 'SELLER') return '卖家';
   if (normalized === 'SHARED') return '双方';
   return '买家';
+}
+
+function deliveryPayerResponsibilityText(payer) {
+  const normalized = String(payer || '').toUpperCase();
+  if (normalized === 'SELLER') return '卖家承担配送费';
+  if (normalized === 'SHARED') return '双方分摊配送费';
+  return '买家承担配送费';
+}
+
+function formatOptionalMoney(value, fallback = '待确认') {
+  if (value === null || value === undefined || value === '') return fallback;
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return fallback;
+  return formatMoney(amount);
 }
 
 function movingStatusActionLabel(status) {
@@ -3252,40 +4191,9 @@ function getMovingWorkflowSteps(isPlatform) {
 }
 
 function getMovingNextActions(service, meta) {
-  const status = String(service?.status || '').toUpperCase();
-  const isPlatform = isPlatformMovingServiceRecord(service, meta);
-
-  if (!isPlatform) {
-    if (status === 'PENDING') return ['CONFIRMED', 'CANCELED'];
-    if (status === 'CONFIRMED') return ['IN_PROGRESS', 'CANCELED'];
-    if (status === 'IN_PROGRESS') return ['COMPLETED', 'CANCELED'];
-    return [];
-  }
-
-  if (status === 'WAITING_PLATFORM_DELIVERY_QUOTE') {
-    return ['DELIVERY_QUOTE_CONFIRMED', 'CANCELED'];
-  }
-  if (status === 'DELIVERY_QUOTE_CONFIRMED') {
-    return [];
-  }
-  if (status === 'BUYER_PAID_WAITING_DRIVER') {
-    return ['DRIVER_ASSIGNED', 'CANCELED'];
-  }
-  if (status === 'DRIVER_ASSIGNED') {
-    return ['PICKED_UP', 'CANCELED'];
-  }
-  if (status === 'PICKED_UP') {
-    return ['IN_TRANSIT', 'CANCELED'];
-  }
-  if (status === 'IN_TRANSIT') {
-    return ['DELIVERED_WAITING_BUYER_INSPECTION', 'CANCELED'];
-  }
-  if (status === 'DELIVERED_WAITING_BUYER_INSPECTION') {
-    return [];
-  }
-  if (status === 'BUYER_CONFIRMED_RECEIPT') {
-    return ['COMPLETED'];
-  }
+  // Moving, delivery, and storage products are not writable V1 workflows.
+  // Their historical records remain visible, but only a future approved,
+  // dedicated workflow may re-enable state transitions.
   return [];
 }
 
@@ -3377,6 +4285,8 @@ function clearMovingWorkflowInputs() {
     const el = document.getElementById(id);
     if (el) el.value = '';
   });
+  const pickupUpload = document.getElementById('movingWorkflowPickupUploadFiles');
+  if (pickupUpload) pickupUpload.value = '';
   MOVING_WORKFLOW_TIME_WHEEL_IDS.forEach((fieldId) => clearTimeWheel(fieldId));
 }
 
@@ -3413,10 +4323,12 @@ function renderMovingWorkflowPanel(preferredStatus = '') {
   }
 
   const meta = parseJsonNotes(service.notes);
-  const quoteInfo = meta?.quoteInfo && typeof meta.quoteInfo === 'object' ? meta.quoteInfo : {};
+  const quoteInfo = meta?.quoteInfo && typeof meta.quoteInfo === 'object' ? meta.quoteInfo : null;
   const isPlatform = isPlatformMovingServiceRecord(service, meta);
   const actions = getMovingNextActions(service, meta);
   const currentStatus = String(service.status || '').toUpperCase();
+  const workflowReadOnlyNotice =
+    '<p class="md:col-span-2 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">当前 V1 不提供搬运、配送或仓储状态推进；此记录仅可查看。平台配送保持关闭，任何未来重开都必须使用经批准的专用流程。</p>';
 
   summary.innerHTML = `
     <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
@@ -3426,10 +4338,15 @@ function renderMovingWorkflowPanel(preferredStatus = '') {
       </div>
       <div>
         <p class="text-gray-700">联系人：${escapeHtml(service.contactName || '-')} · ${escapeHtml(maskPhone(service.contactPhone || '-'))}</p>
-        <p class="text-gray-500 mt-1">配送费：${formatMoney(meta?.deliveryFee || service.estimatedCost || 0)}（${deliveryPayerLabel(
-    meta?.deliveryFeePayer
-  )}支付）</p>
+        <p class="text-gray-500 mt-1">配送费：${formatMoney(meta?.deliveryFee || service.estimatedCost || 0)}</p>
+        <p class="text-gray-500 mt-1">付款责任：${deliveryPayerResponsibilityText(meta?.deliveryFeePayer)}</p>
+        <p class="text-gray-500 mt-1">买家应付：${formatOptionalMoney(meta?.buyerPayableTotal)}</p>
+        <p class="text-gray-500 mt-1">卖家结算：${formatOptionalMoney(meta?.sellerSettlementAmount)}</p>
+        ${quoteInfo ? `<p class="text-gray-500 mt-1">路线：${escapeHtml(formatRouteQuoteSummary(quoteInfo))}</p>` : ''}
+        ${quoteInfo ? `<p class="text-gray-500 mt-1">费用拆分：${escapeHtml(formatRouteQuoteBreakdown(quoteInfo))}</p>` : ''}
+        ${quoteInfo ? `<p class="text-gray-500 mt-1">距离/时长：${escapeHtml(formatRouteDistanceKm(quoteInfo.distanceKm))} · ${escapeHtml(formatRouteDurationMinutes(quoteInfo.durationMinutes))}</p>` : ''}
       </div>
+      ${workflowReadOnlyNotice}
     </div>
   `;
   timeline.innerHTML = renderMovingWorkflowTimeline(currentStatus, isPlatform);
@@ -3442,7 +4359,7 @@ function renderMovingWorkflowPanel(preferredStatus = '') {
     submitBtn.disabled = true;
     applyMovingWorkflowFieldVisibility('');
     const hint = document.getElementById('movingWorkflowHint');
-    if (hint) hint.textContent = '当前服务已到终态或等待用户侧动作，无需后台更新。';
+    if (hint) hint.textContent = '当前 V1 中服务记录只读；不能通过后台修改状态。';
     return;
   }
 
@@ -3458,12 +4375,12 @@ function renderMovingWorkflowPanel(preferredStatus = '') {
     quoteInput.value = String(state.movingWorkflowDefaultQuote);
   }
 
-  setTimeWheelValue('movingWorkflowEstimatedPickupAt', quoteInfo.estimatedPickupAt || '');
-  setTimeWheelValue('movingWorkflowEstimatedDeliveryAt', quoteInfo.estimatedDeliveryAt || '');
-  if (!quoteInfo.estimatedPickupAt) {
+  setTimeWheelValue('movingWorkflowEstimatedPickupAt', quoteInfo?.estimatedPickupAt || '');
+  setTimeWheelValue('movingWorkflowEstimatedDeliveryAt', quoteInfo?.estimatedDeliveryAt || '');
+  if (!quoteInfo?.estimatedPickupAt) {
     seedTimeWheelDate('movingWorkflowEstimatedPickupAt', service.movingDate);
   }
-  if (!quoteInfo.estimatedDeliveryAt) {
+  if (!quoteInfo?.estimatedDeliveryAt) {
     seedTimeWheelDate('movingWorkflowEstimatedDeliveryAt', service.movingDate);
   }
 
@@ -3483,121 +4400,21 @@ function openMovingWorkflow(serviceId, preferredStatus = '', defaultQuote = 0) {
   state.selectedMovingServiceId = id;
   state.movingWorkflowDefaultQuote = Number(defaultQuote || 0);
   clearMovingWorkflowInputs();
+  const service = state.movingServicesById.get(id);
   renderMovingWorkflowPanel(preferredStatus);
-  setMovingWorkflowMessage('info', `已进入服务 #${id} 的流程工作台，可直接在页面内更新。`);
+  setMovingWorkflowMessage('info', `已打开服务 #${id} 的只读记录。`);
   document.getElementById('movingWorkflowPanel')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
-async function submitMovingWorkflow() {
-  if (state.movingWorkflowSubmitting) return;
-  const serviceId = Number(state.selectedMovingServiceId || 0);
-  const service = serviceId ? state.movingServicesById.get(serviceId) : null;
-  if (!service) {
-    setMovingWorkflowMessage('error', '请先选择一条配送/搬运服务。');
-    return;
-  }
-
-  const status = getInputValue('movingWorkflowTargetStatus').toUpperCase();
-  if (!status) {
-    setMovingWorkflowMessage('error', '请选择要执行的流程动作。');
-    return;
-  }
-
-  const reason = String(getInputValue('movingWorkflowReason') || '').trim();
-  if (reason.length < 3) {
-    setMovingWorkflowMessage('error', '请填写至少 3 个字符的处理原因。');
-    return;
-  }
-  const moversName = getInputValue('movingWorkflowMoverName');
-  const moversPhone = getInputValue('movingWorkflowMoverPhone');
-  const movingDate = getInputValue('movingWorkflowMovingDate');
-  const movingTime = getInputValue('movingWorkflowMovingTime');
-  const quoteRaw = getInputValue('movingWorkflowQuote');
-  const estimatedPickupAt = getInputValue('movingWorkflowEstimatedPickupAt');
-  const estimatedDeliveryAt = getInputValue('movingWorkflowEstimatedDeliveryAt');
-  const pickupPhotoUrls = parsePhotoUrlInput(getInputValue('movingWorkflowPickupPhotos'));
-  const deliveryPhotoUrls = parsePhotoUrlInput(getInputValue('movingWorkflowDeliveryPhotos'));
-
-  const payload = { status, reason };
-  if (moversName) payload.moversName = moversName;
-  if (moversPhone) payload.moversPhone = moversPhone;
-  if (movingDate) payload.movingDate = movingDate;
-  if (movingTime) payload.movingTime = movingTime;
-  if (estimatedPickupAt) payload.estimatedPickupAt = estimatedPickupAt;
-  if (estimatedDeliveryAt) payload.estimatedDeliveryAt = estimatedDeliveryAt;
-  if (pickupPhotoUrls.length) payload.pickupPhotoUrls = pickupPhotoUrls;
-  if (deliveryPhotoUrls.length) payload.deliveryPhotoUrls = deliveryPhotoUrls;
-
-  if (quoteRaw) {
-    const quote = Number(quoteRaw);
-    if (!Number.isFinite(quote) || quote < 0) {
-      setMovingWorkflowMessage('error', '配送报价格式无效，请填写非负数字。');
-      return;
-    }
-    payload.quote = quote;
-  }
-
-  if (status === 'DELIVERY_QUOTE_CONFIRMED' && payload.quote === undefined) {
-    setMovingWorkflowMessage('error', '确认报价时必须填写配送费（AUD）。');
-    return;
-  }
-
-  if (!(await confirmCriticalAction(`提交服务 #${serviceId} 流程更新：${formatMovingStatusLabel(status)}`, reason))) {
-    return;
-  }
-
-  const submitBtn = document.getElementById('movingWorkflowSubmitBtn');
-  state.movingWorkflowSubmitting = true;
-  if (submitBtn) {
-    submitBtn.disabled = true;
-    submitBtn.textContent = '提交中...';
-  }
-
-  try {
-    await apiRequest(`/admin/offline-services/moving/${serviceId}/status`, {
-      method: 'PATCH',
-      body: JSON.stringify(payload),
-    });
-
-    setMovingWorkflowMessage('success', `服务 #${serviceId} 已更新为「${formatMovingStatusLabel(status)}」。`);
-    await Promise.all([loadMovingServices(state.currentPage.moving), loadOfflineOverview()]);
-    state.selectedMovingServiceId = serviceId;
-    renderMovingWorkflowPanel();
-  } catch (error) {
-    setMovingWorkflowMessage('error', `更新失败：${error.message}`);
-  } finally {
-    state.movingWorkflowSubmitting = false;
-    if (submitBtn) {
-      submitBtn.disabled = false;
-      submitBtn.textContent = '提交流程更新';
-    }
-  }
+function submitMovingWorkflow() {
+  setMovingWorkflowMessage('info', '当前 V1 中搬运/配送记录为只读，不能提交状态修改。');
 }
 
 function renderMovingActionButtons(service, meta) {
-  const serviceId = Number(service.id);
-  const defaultQuote = Number(meta?.deliveryFee || service.estimatedCost || 0);
-  const actions = getMovingNextActions(service, meta);
-
-  if (!actions.length) {
-    const status = String(service.status || '').toUpperCase();
-    if (status === 'DELIVERED_WAITING_BUYER_INSPECTION') {
-      return `<span class="text-xs text-indigo-600">等待买家在 App 聊天页验货并确认收货</span>`;
-    }
-    if (status === 'DISPUTED') {
-      return `<span class="text-xs text-red-600">纠纷处理中，请在纠纷处理页操作</span>`;
-    }
-    return `<span class="text-xs text-gray-500">当前状态无需后台操作</span>`;
-  }
-
-  return actions
-    .map(
-      (action) =>
-        `<button onclick="openMovingWorkflow(${serviceId}, '${action}', ${defaultQuote})" class="btn-gray">${escapeHtml(
-          movingStatusActionLabel(action)
-        )}</button>`
-    )
-    .join('');
+  const frozenLegacy = isPlatformDeliveryFrozenState(service, meta);
+  return frozenLegacy
+    ? '<span class="text-xs text-amber-700">平台配送已移出当前 V1；历史记录仅可查看。</span>'
+    : '<span class="text-xs text-gray-500">当前 V1 对搬运/配送记录仅提供只读查看。</span>';
 }
 
 function parsePhotoUrlInput(rawText) {
@@ -3689,36 +4506,121 @@ function sortMovingServicesForDisplay(services, sortBy) {
 }
 
 function renderMovingServiceCard(svc) {
-  const checked = state.selectedMovingIds.has(svc.id);
   const isActiveService = Number(state.selectedMovingServiceId || 0) === Number(svc.id);
   const meta = parseJsonNotes(svc.notes);
+  const isPlatform = isPlatformMovingServiceRecord(svc, meta);
+  const frozenLegacy = isPlatformDeliveryFrozenState(svc, meta);
+  const quoteInfo = meta?.quoteInfo && typeof meta.quoteInfo === 'object' ? meta.quoteInfo : null;
   const deliveryFeeText = meta ? formatMoney(meta.deliveryFee || 0) : 'A$0.00';
-  const deliveryPayerText = deliveryPayerLabel(meta?.deliveryFeePayer);
   const statusLabel = formatMovingStatusLabel(svc.status);
   const actionButtonsHtml = renderMovingActionButtons(svc, meta);
+  const badges = [
+    isPlatform ? '<span class="px-2 py-1 rounded text-xs bg-sky-100 text-sky-700">平台配送存量单</span>' : '',
+    frozenLegacy ? '<span class="px-2 py-1 rounded text-xs bg-amber-100 text-amber-700">历史只读</span>' : '',
+  ]
+    .filter(Boolean)
+    .join('');
 
   return `
     <div class="card ${isActiveService ? 'ring-2 ring-red-200 border border-red-300' : ''}">
       <div class="flex justify-between items-start mb-2">
         <div class="flex items-start gap-2">
-          <input type="checkbox" class="moving-checkbox mt-1" ${checked ? 'checked' : ''} onchange="toggleMovingSelection(${svc.id}, this.checked)" />
           <div>
             <p class="font-semibold">服务 #${svc.id} · ${escapeHtml(svc.user?.nickname || '未知用户')}</p>
             <p class="text-sm text-gray-700">${escapeHtml(svc.fromAddress)} → ${escapeHtml(svc.toAddress)}</p>
             <p class="text-sm text-gray-700">预约：${formatDate(svc.movingDate)} ${escapeHtml(svc.movingTime || '-')}</p>
-            <p class="text-xs text-gray-500">配送费：${deliveryFeeText}（${deliveryPayerText}支付）</p>
+            <p class="text-xs text-gray-500">配送费：${deliveryFeeText}</p>
+            <p class="text-xs text-gray-500">付款责任：${escapeHtml(deliveryPayerResponsibilityText(meta?.deliveryFeePayer))}</p>
+            <p class="text-xs text-gray-500">买家应付：${escapeHtml(formatOptionalMoney(meta?.buyerPayableTotal))}</p>
+            <p class="text-xs text-gray-500">卖家结算：${escapeHtml(formatOptionalMoney(meta?.sellerSettlementAmount))}</p>
+            ${quoteInfo ? `<p class="text-xs text-gray-500">路线：${escapeHtml(formatRouteQuoteSummary(quoteInfo))}</p>` : ''}
+            ${quoteInfo ? `<p class="text-xs text-gray-500">费用拆分：${escapeHtml(formatRouteQuoteBreakdown(quoteInfo))}</p>` : ''}
+            ${quoteInfo ? `<p class="text-xs text-gray-500">距离/时长：${escapeHtml(formatRouteDistanceKm(quoteInfo.distanceKm))} · ${escapeHtml(formatRouteDurationMinutes(quoteInfo.durationMinutes))}</p>` : ''}
+            ${badges ? `<div class="mt-2 flex flex-wrap gap-2">${badges}</div>` : ''}
           </div>
         </div>
         <span class="px-2 py-1 rounded text-xs ${movingStatusBadgeClass(svc.status)}">${escapeHtml(statusLabel)}</span>
       </div>
       <p class="text-sm text-gray-700 mb-3">费用：${formatMoney(svc.estimatedCost)} · 联系人：${escapeHtml(svc.contactName)} ${escapeHtml(maskPhone(svc.contactPhone || '-'))}</p>
       <div class="flex gap-2 flex-wrap">
-        <button onclick="openMovingWorkflow(${svc.id}, '', ${Number(meta?.deliveryFee || svc.estimatedCost || 0)})" class="btn-dark">进入流程</button>
+        <button onclick="openMovingWorkflow(${svc.id})" class="btn-dark">查看记录</button>
+        ${privateInspectionProofs(svc).map((_, index) => `<button onclick="openPrivateInspectionProof(${Number(svc.id)}, ${index})" class="btn-dark">查看验收凭证 ${index + 1}</button>`).join('')}
         ${actionButtonsHtml}
       </div>
     </div>
   `;
 }
+
+let privateProofPreview = { generation: 0, url: null, controller: null };
+function trustedPrivateProofUrl(raw) {
+  try {
+    const url = new URL(String(raw));
+    if (url.origin !== new URL(API_BASE_URL).origin || url.username || url.password || url.search || url.hash
+      || !/^\/private-proofs\/[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(url.pathname)) return null;
+    return url.href;
+  } catch { return null; }
+}
+
+function privateInspectionProofs(service) {
+  const notes = parseJsonNotes(service?.notes);
+  const values = notes?.inspectionProof?.photoUrls;
+  return Array.isArray(values) ? values.map(trustedPrivateProofUrl).filter(Boolean).slice(0, 2) : [];
+}
+
+function clearPrivateProofPreview() {
+  privateProofPreview.generation++;
+  privateProofPreview.controller?.abort();
+  privateProofPreview.controller = null;
+  if (privateProofPreview.url) URL.revokeObjectURL(privateProofPreview.url);
+  privateProofPreview.url = null;
+  const image = document.getElementById('privateProofImage');
+  if (image) image.removeAttribute('src');
+}
+
+async function openPrivateInspectionProof(serviceId, index) {
+  const url = privateInspectionProofs(state.movingServicesById.get(Number(serviceId)))[index];
+  await openAuthorizedPrivateImage(url, '验收凭证');
+}
+
+async function openAuthorizedPrivateImage(url, title) {
+  if ((!trustedPrivateProofUrl(url) && !trustedReportEvidenceUrl(url)) || !authToken || !adminUser) { showError('凭证暂时无法查看，请重新登录后重试。'); return; }
+  openDetailDrawer(title, '<p id="privateProofStatus">正在核验访问权限…</p><img id="privateProofImage" alt="私密附件" class="max-w-full rounded" />');
+  const token = authToken, generation = privateProofPreview.generation;
+  const controller = new AbortController(); privateProofPreview.controller = controller;
+  const timeout = setTimeout(() => controller.abort(), 20000);
+  try {
+    const response = await fetch(url, { method: 'GET', headers: { Authorization: `Bearer ${token}`, 'Cache-Control': 'no-store' },
+      cache: 'no-store', credentials: 'omit', redirect: 'error', referrerPolicy: 'no-referrer', signal: controller.signal });
+    if (response.status !== 200 || !['image/jpeg','image/png'].includes(response.headers.get('content-type')?.split(';')[0])) throw new Error();
+    const maxBytes = 12 * 1024 * 1024;
+    if (Number(response.headers.get('content-length')) > maxBytes) throw new Error();
+    let blob;
+    if (response.body?.getReader) {
+      const reader = response.body.getReader(), chunks = []; let count = 0;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          count += value.byteLength;
+          if (controller.signal.aborted || count > maxBytes) throw new Error();
+          chunks.push(value);
+        }
+        blob = new Blob(chunks, { type: response.headers.get('content-type').split(';')[0] });
+      } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
+    } else { blob = await response.blob(); }
+    if (!blob.size || blob.size > maxBytes) throw new Error();
+    if (controller.signal.aborted || generation !== privateProofPreview.generation || authToken !== token || !adminUser) return;
+    privateProofPreview.url = URL.createObjectURL(blob);
+    document.getElementById('privateProofImage')?.setAttribute('src', privateProofPreview.url);
+    setText('privateProofStatus', '');
+  } catch {
+    if (generation === privateProofPreview.generation) setText('privateProofStatus', '凭证暂时无法查看，可能是登录或访问权限已变化。');
+  } finally { clearTimeout(timeout); }
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && privateProofPreview.controller) closeDetailDrawer();
+});
 
 function renderMovingServicesWithGrouping(services) {
   const groupBy = document.getElementById('movingGroupByScheduleDate')?.checked !== false;
@@ -3839,36 +4741,12 @@ function toggleSelectAllMoving(checked) {
   updateSelectionCount();
 }
 
-async function batchUpdateMovingStatus(status) {
-  const ids = [...state.selectedMovingIds];
-  if (!ids.length) {
-    setMovingWorkflowMessage('error', '请先勾选要批量处理的配送/搬运单。');
-    return;
-  }
-
-  const previewItems = collectBatchPreview('.moving-checkbox', ['p.font-semibold'], 5);
-  if (!(await confirmBatchPreview(`批量更新配送/搬运状态为 ${status}`, ids.length, previewItems, '线下服务 - 配送/搬运'))) return;
-
-  const reason = await promptReason(`批量更新配送/搬运状态为 ${status}`, true);
-  if (reason === null) return;
-  if (!(await confirmCriticalAction(`批量更新配送/搬运状态为 ${status}（${ids.length}条）`, reason))) return;
-
-  try {
-    await apiRequest('/admin/offline-services/moving/batch-status', {
-      method: 'PATCH',
-      body: JSON.stringify({ ids, status, reason }),
-    });
-
-    state.selectedMovingIds.clear();
-    setMovingWorkflowMessage('success', `已批量更新 ${ids.length} 条为「${formatMovingStatusLabel(status)}」。`);
-    await loadMovingServices(state.currentPage.moving);
-  } catch (error) {
-    setMovingWorkflowMessage('error', `批量更新失败：${error.message}`);
-  }
+function batchUpdateMovingStatus() {
+  setMovingWorkflowMessage('info', '当前 V1 中搬运/配送记录为只读，不能批量修改状态。');
 }
 
-async function updateMovingStatus(serviceId, status, defaultQuote = 0) {
-  openMovingWorkflow(serviceId, status, defaultQuote);
+function updateMovingStatus() {
+  setMovingWorkflowMessage('info', '当前 V1 中搬运/配送记录为只读，不能修改状态。');
 }
 
 async function loadStorageOrders(page = 1) {
@@ -3898,12 +4776,10 @@ async function loadStorageOrders(page = 1) {
       'storageOrdersList',
       data.orders
         .map((order) => {
-          const checked = state.selectedStorageIds.has(order.id);
           return `
             <div class="card">
               <div class="flex justify-between items-start mb-2">
                 <div class="flex items-start gap-2">
-                  <input type="checkbox" class="storage-checkbox mt-1" ${checked ? 'checked' : ''} onchange="toggleStorageSelection(${order.id}, this.checked)" />
                   <div>
                     <p class="font-semibold">仓储单 #${order.id} · ${escapeHtml(order.user?.nickname || '未知用户')}</p>
                     <p class="text-sm text-gray-700">仓库：${escapeHtml(order.storageLocation || '-')}</p>
@@ -3954,48 +4830,12 @@ function toggleSelectAllStorage(checked) {
   updateSelectionCount();
 }
 
-async function batchUpdateStorageStatus(status) {
-  const ids = [...state.selectedStorageIds];
-  if (!ids.length) {
-    showError('请先勾选仓储订单');
-    return;
-  }
-
-  const previewItems = collectBatchPreview('.storage-checkbox', ['p.font-semibold'], 5);
-  if (!(await confirmBatchPreview(`批量更新仓储状态为 ${status}`, ids.length, previewItems, '线下服务 - 仓储订单'))) return;
-
-  const reason = await promptReason(`批量更新仓储状态为 ${status}`, true);
-  if (reason === null) return;
-  if (!(await confirmCriticalAction(`批量更新仓储状态为 ${status}（${ids.length}条）`, reason))) return;
-
-  try {
-    await apiRequest('/admin/offline-services/storage/batch-status', {
-      method: 'PATCH',
-      body: JSON.stringify({ ids, status, reason }),
-    });
-
-    state.selectedStorageIds.clear();
-    await loadStorageOrders(state.currentPage.storage);
-  } catch (error) {
-    showError(`批量更新失败: ${error.message}`);
-  }
+function batchUpdateStorageStatus() {
+  showError('当前 V1 中仓储记录为只读，不能批量修改状态。');
 }
 
-async function updateStorageStatus(orderId, status) {
-  const reason = await promptReason(`更新仓储单 #${orderId} 状态为 ${status}`, true);
-  if (reason === null) return;
-  if (!(await confirmCriticalAction(`更新仓储状态为 ${status}`, reason))) return;
-
-  try {
-    await apiRequest(`/admin/offline-services/storage/${orderId}/status`, {
-      method: 'PATCH',
-      body: JSON.stringify({ status, reason }),
-    });
-
-    await loadStorageOrders(state.currentPage.storage);
-  } catch (error) {
-    showError(`更新状态失败: ${error.message}`);
-  }
+function updateStorageStatus() {
+  showError('当前 V1 中仓储记录为只读，不能修改状态。');
 }
 
 async function loadRecycleConsign() {
@@ -4122,6 +4962,7 @@ async function loadLogs(page = 1) {
 }
 
 async function loadCommercializationSection() {
+  await loadFeatureFlags();
   await Promise.all([
     loadCommercializationOverview(),
     loadPinOrders(1),
@@ -4179,10 +5020,12 @@ async function loadPinOrders(page = 1) {
               <p class="text-xs text-gray-600">金额：${formatMoney(order.amount)} · 时长：${order.durationHours || 0}h</p>
               <p class="text-xs text-gray-600">创建：${formatDateTime(order.createdAt)} · 到期：${formatDateTime(order.expectedExpiresAt)}</p>
               <div class="flex gap-2 mt-2 flex-wrap">
-                <button onclick="updatePinOrder(${order.id}, 'CONFIRM')" class="action-btn action-btn-green">确认支付</button>
-                <button onclick="updatePinOrder(${order.id}, 'FAIL')" class="action-btn action-btn-red">标记失败</button>
-                <button onclick="updatePinOrder(${order.id}, 'CANCEL_PIN')" class="action-btn action-btn-red">取消置顶</button>
-                <button onclick="updatePinOrder(${order.id}, 'EXTEND_24H')" class="action-btn action-btn-blue">延长24h</button>
+                ${paymentsAreEnabled() ? `
+                <button type="button" aria-label="确认置顶订单 ${order.id} 支付" onclick="updatePinOrder(${order.id}, 'CONFIRM')" class="action-btn action-btn-green">确认支付</button>
+                <button type="button" aria-label="将置顶订单 ${order.id} 标记失败" onclick="updatePinOrder(${order.id}, 'FAIL')" class="action-btn action-btn-red">标记失败</button>
+                ` : '<span class="text-xs text-gray-500">历史支付记录只读</span>'}
+                <button type="button" aria-label="取消置顶订单 ${order.id}" onclick="updatePinOrder(${order.id}, 'CANCEL_PIN')" class="action-btn action-btn-red">取消置顶</button>
+                <button type="button" aria-label="将置顶订单 ${order.id} 延长 24 小时" onclick="updatePinOrder(${order.id}, 'EXTEND_24H')" class="action-btn action-btn-blue">延长24小时</button>
               </div>
             </div>
           `;
@@ -4197,9 +5040,14 @@ async function loadPinOrders(page = 1) {
 }
 
 async function updatePinOrder(orderId, action) {
-  const reason = await promptReason(`置顶订单操作：${action}`, true);
+  if (['CONFIRM', 'FAIL', 'CANCEL'].includes(String(action).toUpperCase()) && !paymentsAreEnabled()) {
+    showError(paymentsUnavailableMessage);
+    return;
+  }
+  const actionLabel = pinOrderActionLabel(action);
+  const reason = await promptReason(`置顶订单操作：${actionLabel}`, true);
   if (reason === null) return;
-  if (!(await confirmCriticalAction(`置顶订单执行 ${action}`, reason))) return;
+  if (!(await confirmCriticalAction(`置顶订单执行：${actionLabel}`, reason))) return;
 
   try {
     await apiRequest(`/admin/commercialization/pin-orders/${orderId}`, {
@@ -4258,19 +5106,19 @@ async function loadMemberships(page = 1) {
 
 async function openGrantMembershipPrompt() {
   const userId = Number((await promptText('输入用户ID：', '', {
-    title: '发放会员',
+    title: '赠送会员（不收款）',
     label: '用户ID',
     confirmText: '继续',
     confirmVariant: 'dark',
   })) || 0);
   if (!userId) return;
-  const mode = ((await promptText('发放模式（CONFIRM/PENDING）', 'CONFIRM', {
-    title: '发放会员',
-    label: '发放模式',
+  const mode = paymentsAreEnabled() ? normalizeMembershipGrantMode((await promptText('发放方式（立即发放 / 待处理）', '立即发放', {
+    title: '赠送会员（不收款）',
+    label: '发放方式',
     confirmText: '继续',
     confirmVariant: 'dark',
-  })) || 'CONFIRM').toUpperCase();
-  const reason = await promptReason('发放会员原因', true);
+  })) || '立即发放') : 'CONFIRM';
+  const reason = await promptReason('赠送会员原因（不收款）', true);
   if (reason === null) return;
 
   try {
@@ -4330,14 +5178,18 @@ async function openGrantRewardPrompt() {
     confirmVariant: 'dark',
   })) || 0);
   if (!userId) return;
-  const rewardType = ((await promptText('奖励类型（PIN_CREDIT / MEMBERSHIP_30D / POINTS / BALANCE）', 'PIN_CREDIT', {
+  const rewardType = normalizeRewardType((await promptText(paymentsAreEnabled() ? '奖励类型（置顶 / 会员30天 / 积分 / 余额）' : '奖励类型（置顶 / 会员30天 / 积分；余额暂未开放）', '置顶', {
     title: '发放奖励',
     label: '奖励类型',
     confirmText: '继续',
     confirmVariant: 'dark',
-  })) || '').toUpperCase();
+  })) || '置顶');
   if (!rewardType) return;
-  const rewardValue = (await promptText('奖励值（例如 PIN_24H / 100 / 10.00）', '', {
+  if (rewardType === 'BALANCE' && !paymentsAreEnabled()) {
+    showError(paymentsUnavailableMessage);
+    return;
+  }
+  const rewardValue = (await promptText('奖励值（例如 24h / 100 / 10.00）', '', {
     title: '发放奖励',
     label: '奖励值',
     required: false,
@@ -4366,10 +5218,320 @@ async function openGrantRewardPrompt() {
   }
 }
 
+
+function withdrawalStatusLabel(status) {
+  switch (String(status || '').trim().toUpperCase()) {
+    case 'PENDING':
+      return '待处理';
+    case 'PAID':
+      return '已打款';
+    case 'REJECTED':
+      return '已驳回';
+    case 'FAILED':
+      return '失败';
+    default:
+      return String(status || '-');
+  }
+}
+
+function withdrawalStatusBadgeType(status) {
+  switch (String(status || '').trim().toUpperCase()) {
+    case 'PAID':
+      return 'success';
+    case 'PENDING':
+      return 'warning';
+    case 'REJECTED':
+    case 'FAILED':
+      return 'danger';
+    default:
+      return 'default';
+  }
+}
+
+function formatWithdrawalBankSnapshot(snapshot) {
+  if (!snapshot) return '-';
+  let data = snapshot;
+  if (typeof snapshot === 'string') {
+    try {
+      data = JSON.parse(snapshot);
+    } catch {
+      return String(snapshot);
+    }
+  }
+  if (!data || typeof data !== 'object') return '-';
+  const parts = [];
+  if (data.bankName) parts.push(`银行：${data.bankName}`);
+  if (data.accountName) parts.push(`户名：${data.accountName}`);
+  if (data.bsb) parts.push(`BSB：${data.bsb}`);
+  if (data.accountNumber) parts.push(`账号：${maskAccountNumber(data.accountNumber)}`);
+  return parts.length ? parts.join(' · ') : '-';
+}
+
+function withdrawalActionLabel(action) {
+  switch (String(action || '').trim().toUpperCase()) {
+    case 'PAID':
+      return '确认已打款';
+    case 'REJECT':
+      return '驳回提现';
+    case 'FAILED':
+      return '标记失败';
+    default:
+      return String(action || '-');
+  }
+}
+
+function renderWithdrawalListItem(request) {
+  const statusType = withdrawalStatusBadgeType(request.status);
+  return `
+    <div class="border rounded p-3 bg-white">
+      <div class="flex justify-between items-start gap-2 mb-1">
+        <div>
+          <p class="font-semibold">提现 #${request.id}</p>
+          <p class="text-xs text-gray-500">${escapeHtml(withdrawalStatusLabel(request.status))}</p>
+        </div>
+        ${formatStatusBadge(request.status, statusType)}
+      </div>
+      <p class="text-xs text-gray-600">用户：${escapeHtml(request.user?.nickname || maskEmail(request.user?.email) || `#${request.user?.id || '-'}`)} · ${escapeHtml(request.user?.email || '-')}</p>
+      <p class="text-xs text-gray-600">金额：${formatMoney(request.amount)} ${escapeHtml(request.currency || 'AUD')} · 可提现余额：${formatMoney(request.user?.withdrawableBalance || 0)}</p>
+      <p class="text-xs text-gray-600">收款信息：${escapeHtml(formatWithdrawalBankSnapshot(request.bankSnapshot))}</p>
+      <p class="text-xs text-gray-600">提交：${formatDateTime(request.createdAt)}${request.reviewedAt ? ` · 处理：${formatDateTime(request.reviewedAt)}` : ''}${request.paidAt ? ` · 打款：${formatDateTime(request.paidAt)}` : ''}</p>
+      <div class="flex gap-2 mt-2 flex-wrap">
+        <button type="button" aria-label="查看提现申请 ${request.id} 详情" onclick="openWithdrawalDetail(${request.id})" class="action-btn action-btn-blue">查看详情</button>
+        ${
+          paymentsAreEnabled() && String(request.status || '').toUpperCase() === 'PENDING'
+            ? `<button type="button" aria-label="处理提现申请 ${request.id}" onclick="openWithdrawalDetail(${request.id})" class="action-btn action-btn-dark">处理提现</button>`
+            : ''
+        }
+      </div>
+    </div>
+  `;
+}
+
+function buildWithdrawalDetailHtml(request) {
+  const user = request.user || {};
+  const admin = request.admin || {};
+  const isPending = String(request.status || '').toUpperCase() === 'PENDING';
+  const snapshotText = formatWithdrawalBankSnapshot(request.bankSnapshot);
+  return `
+    <div class="space-y-4 text-sm">
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div class="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+          <p class="text-xs uppercase tracking-wide text-slate-500">提现信息</p>
+          <div class="mt-2 space-y-1">
+            <p><span class="font-semibold">提现ID：</span>#${request.id}</p>
+            <p><span class="font-semibold">状态：</span>${escapeHtml(withdrawalStatusLabel(request.status))}</p>
+            <p><span class="font-semibold">金额：</span>${formatMoney(request.amount)} ${escapeHtml(request.currency || 'AUD')}</p>
+            <p><span class="font-semibold">提交时间：</span>${formatDateTime(request.createdAt)}</p>
+            <p><span class="font-semibold">更新时间：</span>${formatDateTime(request.updatedAt)}</p>
+          </div>
+        </div>
+        <div class="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+          <p class="text-xs uppercase tracking-wide text-slate-500">申请用户</p>
+          <div class="mt-2 space-y-1">
+            <p><span class="font-semibold">用户：</span>${escapeHtml(user.nickname || user.email || `#${user.id || '-'}`)}</p>
+            <p><span class="font-semibold">邮箱：</span>${escapeHtml(user.email || '-')}</p>
+            <p><span class="font-semibold">销售总额：</span>${formatMoney(user.salesTotal || 0)}</p>
+            <p><span class="font-semibold">可提现余额：</span>${formatMoney(user.withdrawableBalance || 0)}</p>
+            <p><span class="font-semibold">账户余额：</span>${formatMoney(user.balance || 0)}</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="rounded-2xl border border-slate-200 bg-white p-4">
+        <p class="text-xs uppercase tracking-wide text-slate-500">收款信息</p>
+        <div class="mt-2 space-y-1">
+          <p><span class="font-semibold">银行名称：</span>${escapeHtml(request.bankName || '-')}</p>
+          <p><span class="font-semibold">收款户名：</span>${escapeHtml(request.accountName || '-')}</p>
+          <p><span class="font-semibold">BSB：</span>${escapeHtml(request.bsb || '-')}</p>
+          <p><span class="font-semibold">银行卡号：</span>${escapeHtml(request.accountNumber || '-')}</p>
+          <p><span class="font-semibold">备注：</span>${escapeHtml(request.note || '-')}</p>
+          <p><span class="font-semibold">银行快照：</span>${escapeHtml(snapshotText)}</p>
+        </div>
+      </div>
+
+      <div class="rounded-2xl border border-slate-200 bg-white p-4">
+        <p class="text-xs uppercase tracking-wide text-slate-500">处理记录</p>
+        <div class="mt-2 space-y-1">
+          <p><span class="font-semibold">审核管理员：</span>${escapeHtml(admin.nickname || admin.email || '-')}</p>
+          <p><span class="font-semibold">管理员备注：</span>${escapeHtml(request.adminNote || '-')}</p>
+          <p><span class="font-semibold">审核时间：</span>${formatDateTime(request.reviewedAt)}</p>
+          <p><span class="font-semibold">打款时间：</span>${formatDateTime(request.paidAt)}</p>
+          <p><span class="font-semibold">转账参考号：</span>${escapeHtml(request.payoutReference || '-')}</p>
+        </div>
+      </div>
+
+      ${
+        !paymentsAreEnabled()
+          ? `<div class="rounded border border-amber-200 bg-amber-50 p-4">${escapeHtml(paymentsUnavailableMessage)} 当前记录状态：${escapeHtml(withdrawalStatusLabel(request.status))}。</div>`
+          : isPending
+          ? `
+        <div class="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+          <p class="text-sm font-semibold text-amber-900">当前提现仍在等待管理员处理</p>
+          <p class="mt-1 text-xs text-amber-800">请在操作前再次核对银行卡信息、金额和原因。</p>
+          <div class="mt-3 flex flex-wrap gap-2">
+            <button type="button" onclick="openWithdrawalActionDialog(${request.id}, 'PAID')" class="action-btn action-btn-green">确认已打款</button>
+            <button type="button" onclick="openWithdrawalActionDialog(${request.id}, 'REJECT')" class="action-btn action-btn-red">驳回提现</button>
+            <button type="button" onclick="openWithdrawalActionDialog(${request.id}, 'FAILED')" class="action-btn action-btn-red">标记失败</button>
+          </div>
+        </div>
+      `
+          : `
+        <div class="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-xs text-slate-600">
+          该提现当前状态为 <span class="font-semibold">${escapeHtml(withdrawalStatusLabel(request.status))}</span>，已完成或已结束处理。
+        </div>
+      `
+      }
+    </div>
+  `;
+}
+
+function openWithdrawalDetail(withdrawalId) {
+  const request = state.withdrawalsById.get(Number(withdrawalId));
+  if (!request) {
+    showError('未找到提现记录');
+    return;
+  }
+  openDetailDrawer(`提现详情 #${request.id}`, buildWithdrawalDetailHtml(request));
+}
+
+async function openWithdrawalActionDialog(withdrawalId, action) {
+  if (!paymentsAreEnabled()) {
+    showError(paymentsUnavailableMessage);
+    return;
+  }
+  const request = state.withdrawalsById.get(Number(withdrawalId));
+  if (!request) {
+    showError('未找到提现记录');
+    return;
+  }
+
+  const actionLabel = withdrawalActionLabel(action);
+  const result = await openAdminDialog({
+    title: actionLabel,
+    subtitle: `提现 #${request.id} · ${formatMoney(request.amount)} ${request.currency || 'AUD'}`,
+    bodyHtml: `
+      <div class="space-y-3 text-sm text-slate-700">
+        <p><span class="font-semibold">收款户名：</span>${escapeHtml(request.accountName || '-')}</p>
+        <p><span class="font-semibold">银行卡号：</span>${escapeHtml(request.accountNumber || '-')}</p>
+        <p><span class="font-semibold">BSB：</span>${escapeHtml(request.bsb || '-')}</p>
+        <p><span class="font-semibold">银行：</span>${escapeHtml(request.bankName || '-')}</p>
+        <p><span class="font-semibold">当前状态：</span>${escapeHtml(withdrawalStatusLabel(request.status))}</p>
+      </div>
+    `,
+    fields: [
+      {
+        name: 'reason',
+        label: '处理原因',
+        type: 'textarea',
+        value: '',
+        placeholder: '请输入处理原因',
+        required: true,
+        minLength: 3,
+        rows: 4,
+      },
+      ...(String(action).toUpperCase() === 'PAID'
+        ? [
+            {
+              name: 'payoutReference',
+              label: '转账参考号（可选）',
+              type: 'text',
+              value: '',
+              placeholder: '银行流水号 / 转账参考号',
+              required: false,
+            },
+          ]
+        : []),
+    ],
+    confirmText:
+      String(action).toUpperCase() === 'PAID'
+        ? '确认已打款'
+        : String(action).toUpperCase() === 'REJECT'
+        ? '确认驳回'
+        : '确认失败',
+    cancelText: '取消',
+    confirmVariant: String(action).toUpperCase() === 'PAID' ? 'dark' : 'danger',
+    presentation: 'drawer',
+  });
+
+  if (!result.confirmed) return;
+
+  const reason = String(result.values?.reason || '').trim();
+  if (reason.length < 3) {
+    showError('处理原因至少 3 个字符');
+    return;
+  }
+
+  try {
+    await apiRequest(`/admin/withdrawals/${withdrawalId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        action,
+        reason,
+        payoutReference: String(result.values?.payoutReference || '').trim(),
+      }),
+    });
+    showSuccess(`提现已${String(action).toUpperCase() === 'PAID' ? '打款' : String(action).toUpperCase() === 'REJECT' ? '驳回' : '标记失败'}`);
+    closeDetailDrawer();
+    await loadWithdrawals(state.currentPage.withdrawals || 1);
+    if (state.currentSection === 'dashboard') {
+      await loadDashboard();
+    }
+  } catch (error) {
+    showError(`处理提现失败: ${error.message}`);
+  }
+}
+
+async function loadWithdrawalsSection() {
+  await loadFeatureFlags();
+  await loadWithdrawals(state.currentPage.withdrawals || 1);
+}
+
+async function loadWithdrawals(page = 1) {
+  state.currentPage.withdrawals = page;
+
+  const params = new URLSearchParams({ page: String(page), limit: '8' });
+  const search = getInputValue('withdrawalSearch');
+  const status = getInputValue('withdrawalStatus');
+  const dateFrom = getInputValue('withdrawalDateFrom');
+  const dateTo = getInputValue('withdrawalDateTo');
+  const sortOrder = getInputValue('withdrawalSortOrder') || 'desc';
+
+  if (search) params.set('search', search);
+  if (status) params.set('status', status);
+  if (dateFrom) params.set('dateFrom', dateFrom);
+  if (dateTo) params.set('dateTo', dateTo);
+  if (sortOrder) params.set('sortOrder', sortOrder);
+
+  try {
+    const data = await apiRequest(`/admin/withdrawals?${params.toString()}`);
+    const items = Array.isArray(data.items) ? data.items : [];
+    state.withdrawalsById = new Map(items.map((item) => [item.id, item]));
+
+    setText('withdrawalsTotalCount', data.total || 0);
+    setText('withdrawalsTotalCountFooter', data.total || 0);
+    setText('withdrawalsRequestCount', data.summary?.requestCount || 0);
+    setText('withdrawalsTotalAmount', formatMoney(data.summary?.totalAmount || 0));
+    setText('withdrawalsSummaryLabel', status ? `当前筛选：${withdrawalStatusLabel(status)}` : '当前筛选：全部状态');
+    setText('withdrawalsHint', items.length ? '点击“查看详情”展开银行卡、用户与处理记录' : '暂无提现申请');
+
+    if (!items.length) {
+      setHtml('withdrawalsList', '<div class="text-gray-500 text-sm">暂无提现申请</div>');
+      renderPagination('withdrawalsPagination', 1, 1, () => {});
+      return;
+    }
+
+    setHtml('withdrawalsList', items.map((request) => renderWithdrawalListItem(request)).join(''));
+    renderPagination('withdrawalsPagination', page, data.totalPages || 1, loadWithdrawals);
+  } catch (error) {
+    showError(`加载提现申请失败: ${error.message}`);
+  }
+}
+
 async function loadFeatureFlags() {
   try {
     const data = await apiRequest('/admin/feature-flags');
     const flags = data.flags || {};
+    state.featureFlags.paymentsEnabled = flags.paymentsEnabled === true;
     const setCheckbox = (id, value) => {
       const el = document.getElementById(id);
       if (el) el.checked = Boolean(value);
@@ -4380,8 +5542,8 @@ async function loadFeatureFlags() {
     };
 
     setCheckbox('flagBatchPublishEnabled', flags.batchPublishEnabled);
-    setCheckbox('flagPaidPinEnabled', flags.paidPinEnabled);
-    setCheckbox('flagMembershipPurchaseEnabled', flags.membershipPurchaseEnabled);
+    setCheckbox('flagPaidPinEnabled', paymentsAreEnabled() && flags.paidPinEnabled === true);
+    setCheckbox('flagMembershipPurchaseEnabled', paymentsAreEnabled() && flags.membershipPurchaseEnabled === true);
     setCheckbox('flagFeedbackRewardEnabled', flags.feedbackRewardEnabled);
     setCheckbox('flagOfflineServiceEnabled', flags.offlineServiceEnabled);
     setCheckbox('flagItemReviewEnabled', flags.itemReviewEnabled);
@@ -4392,7 +5554,19 @@ async function loadFeatureFlags() {
     setValue('flagPin7dPrice', flags.pinPricing?.pin7d ?? 8.99);
     setValue('flagFreeBatchQuota', flags.freeBatchQuota ?? 1);
     setValue('flagFeedbackDailyLimit', flags.feedbackDailyLimit ?? 5);
+    state.featureFlags.platformDeliveryEnabled = flags.platformDeliveryEnabled === true;
+    state.featureFlags.platformDeliveryMessage = String(flags.platformDeliveryMessage || '').trim();
+    renderPlatformDeliveryNoticeBanners();
+    renderPaymentsNoticeBanners();
   } catch (error) {
+    state.featureFlags.paymentsEnabled = false;
+    state.featureFlags.platformDeliveryEnabled = false;
+    for (const id of ['flagPaidPinEnabled', 'flagMembershipPurchaseEnabled']) {
+      const el = document.getElementById(id);
+      if (el) el.checked = false;
+    }
+    renderPlatformDeliveryNoticeBanners();
+    renderPaymentsNoticeBanners();
     showError(`加载功能开关失败: ${error.message}`);
   }
 }
@@ -4408,8 +5582,6 @@ async function saveFeatureFlags() {
 
   const flags = {
     batchPublishEnabled: getCheckbox('flagBatchPublishEnabled'),
-    paidPinEnabled: getCheckbox('flagPaidPinEnabled'),
-    membershipPurchaseEnabled: getCheckbox('flagMembershipPurchaseEnabled'),
     feedbackRewardEnabled: getCheckbox('flagFeedbackRewardEnabled'),
     offlineServiceEnabled: getCheckbox('flagOfflineServiceEnabled'),
     itemReviewEnabled: getCheckbox('flagItemReviewEnabled'),
@@ -4440,19 +5612,197 @@ async function saveFeatureFlags() {
 
 window.onload = async () => {
   initializeMovingWorkflowTimeWheels();
-  await fetchCsrfToken();
 
   if (authToken && adminUser) {
-    document.getElementById('loginModal')?.classList.add('hidden');
-    document.getElementById('mainContent')?.classList.remove('hidden');
-    setText('adminName', adminUser.nickname || adminUser.email || '管理员');
+    renderAuthenticatedState();
 
     try {
       await apiRequest('/admin/stats');
       await showSection('dashboard');
     } catch (error) {
       showError('管理员会话已失效，请重新登录');
-      logout();
+      clearAdminSession();
+      renderLoggedOutState({ replaceUrl: true, clearEmail: true });
+    }
+    return;
+  }
+
+  renderLoggedOutState({ replaceUrl: false });
+};
+
+async function loadContentCleanups(page = 1) {
+  if (!Number.isSafeInteger(page) || page < 1 || page > 10000 || !authToken || state.currentSection !== 'deletionReview') return;
+  const token = authToken, generation = deletionReview.generation, cleanupsGeneration = ++deletionReview.cleanupsGeneration;
+  deletionReview.mediaGeneration += 1;
+  deletionReview.cleanups.clear();
+  const current = () => token === authToken && generation === deletionReview.generation
+    && cleanupsGeneration === deletionReview.cleanupsGeneration && state.currentSection === 'deletionReview';
+  for (const id of ['contentCleanupsList', 'contentCleanupsPagination', 'contentMediaDetail']) document.getElementById(id).innerHTML = '';
+  setText('contentMediaDetail', '');
+  setText('contentCleanupsStatus', '正在读取消息清理记录…');
+  try {
+    const data = await readDeletionReview(`/content-cleanups?page=${page}`, token);
+    if (!current()) return;
+    if (data.readOnly !== true || data.executionEnabled !== false || data.page !== page || data.pageSize !== 25
+      || !deletionCount(data.total) || !Array.isArray(data.cleanups) || data.cleanups.length > 25 || data.total < data.cleanups.length
+      || new Set(data.cleanups.map(row => row?.id)).size !== data.cleanups.length
+      || data.cleanups.some(row => !row || !deletionRequestIdPattern.test(row.id) || !['TEXT', 'IMAGE'].includes(row.contentKind)
+        || row.contentRemoved !== true || row.overallCompleted !== false || row.backupVerification !== 'PENDING'
+        || row.mediaDisposition !== (row.contentKind === 'IMAGE' ? 'PENDING_REVIEW' : 'NOT_APPLICABLE')
+        || !deletionDate(row.originalDeadline) || !deletionDate(row.processedAt) || Date.parse(row.originalDeadline) > Date.parse(row.processedAt))) {
+      throw new Error('DELETION_INVALID_RESPONSE');
+    }
+    for (const row of data.cleanups) deletionReview.cleanups.set(row.id, { contentKind: row.contentKind });
+    document.getElementById('contentCleanupsList').innerHTML = data.cleanups.map(row => `<div class="card">
+      <p class="font-medium">${row.contentKind === 'IMAGE' ? '图片消息正文已清理，图片保留待核查' : '普通消息正文已清理'}</p>
+      <p class="text-sm text-gray-600 mt-2">处理时间：${escapeHtml(formatDateTime(row.processedAt))}</p>
+      <p class="text-sm text-amber-800 mt-2">缓存与备份待核查；账号注销尚未完成。</p>
+      ${row.contentKind === 'IMAGE' ? `<button type="button" class="btn-gray mt-3" onclick="openContentMedia('${row.id}')">核查关联图片</button>` : ''}
+      </div>`).join('');
+    setText('contentCleanupsStatus', data.total === 0 ? '目前没有消息内容清理记录。'
+      : data.cleanups.length === 0 ? '本页已无记录，请返回上一页。' : `共有 ${data.total} 项正文清理记录。此页面只供核查。`);
+    renderPagination('contentCleanupsPagination', page, Math.min(10000, Math.ceil(data.total / 25)), loadContentCleanups);
+  } catch (error) { if (current()) setText('contentCleanupsStatus', deletionReviewMessage(error)); }
+}
+
+async function openContentMedia(cleanupId) {
+  if (deletionReview.cleanups.get(cleanupId)?.contentKind !== 'IMAGE' || !authToken || state.currentSection !== 'deletionReview') return;
+  const token = authToken, generation = deletionReview.generation, mediaGeneration = ++deletionReview.mediaGeneration;
+  const current = () => token === authToken && generation === deletionReview.generation
+    && mediaGeneration === deletionReview.mediaGeneration && state.currentSection === 'deletionReview';
+  setText('contentMediaDetail', '正在核查图片关联…');
+  try {
+    const data = await readDeletionReview(`/content-cleanups/${encodeURIComponent(cleanupId)}/assets`, token);
+    if (!current()) return;
+    if (data.readOnly !== true || data.executionEnabled !== false || data.objectDeletionAuthorized !== false || data.ownershipVerified !== false
+      || data.externalReferencesVerified !== false || data.objectRead !== false || data.referenceCoverage !== 'NOT_PROVEN_ABSENT'
+      || !['RECORDED', 'MISSING'].includes(data.uploadRegistration) || !deletionCount(data.registeredActiveReferences)
+      || (data.uploadRegistration === 'MISSING' ? data.uploadStatus !== null || data.registeredActiveReferences !== 0
+        : !['PENDING', 'AVAILABLE', 'VERIFY_REQUIRED'].includes(data.uploadStatus))
+      || !deletionCount(data.knownReferenceRows) || !deletionCount(data.heldReferenceRows) || data.heldReferenceRows > data.knownReferenceRows
+      || data.disposition !== (data.heldReferenceRows ? 'RETAIN_HELD' : data.knownReferenceRows ? 'RETAIN_REFERENCED' : 'RETAIN_UNVERIFIED')) {
+      throw new Error('DELETION_INVALID_RESPONSE');
+    }
+    const description = data.disposition === 'RETAIN_HELD' ? '关联资料有有效保全，图片继续保留。'
+      : data.disposition === 'RETAIN_REFERENCED' ? '图片仍有其他资料引用，继续保留。' : '暂未发现其他引用，归属及外部引用仍未核实，图片继续保留。';
+    setText('contentMediaDetail', `${description} 检测到 ${data.knownReferenceRows} 条关联记录。${data.uploadRegistration === 'RECORDED' ? '已有上传来源登记，仍需核查文件及外部引用。' : '尚无上传来源登记。'} 尚未读取或删除图片文件。`);
+    document.getElementById('contentMediaDetail')?.scrollIntoView?.({ block: 'nearest' });
+  } catch (error) {
+    if (current()) {
+      setText('contentMediaDetail', deletionReviewMessage(error));
+      document.getElementById('contentMediaDetail')?.scrollIntoView?.({ block: 'nearest' });
     }
   }
-};
+}
+
+
+function mediaVerificationValid(value, createdAt) {
+  if (value === null || value === undefined) return true;
+  if (!value || !deletionRequestIdPattern.test(value.id) || value.observationOnly !== true
+    || value.uploadStateChanged !== false || value.objectDeletionAuthorized !== false
+    || !deletionDate(value.startedAt) || Date.parse(value.startedAt) < Date.parse(createdAt)) return false;
+  if (value.state === 'RUNNING') return value.outcome === null && value.completedAt === null;
+  if (!deletionDate(value.completedAt) || Date.parse(value.completedAt) < Date.parse(value.startedAt)) return false;
+  return value.state === 'ABANDONED' ? value.outcome === null
+    : value.state === 'COMPLETED' && ['MATCHED', 'DIFFERENT', 'NOT_FOUND', 'UNAVAILABLE'].includes(value.outcome);
+}
+
+function mediaVerificationLabel(value) {
+  if (!value) return '尚无文件核验记录。';
+  const label = value.state === 'RUNNING' ? '正在核验' : value.state === 'ABANDONED' ? '核验已中止'
+    : { MATCHED: '核验时内容一致', DIFFERENT: '核验内容不一致', NOT_FOUND: '核验时未找到文件', UNAVAILABLE: '核验未完成' }[value.outcome];
+  return `${label} · ${formatDateTime(value.completedAt || value.startedAt)}。核验结果仅反映当时状态。`;
+}
+
+async function loadMediaUploads(page = 1) {
+  if (!Number.isSafeInteger(page) || page < 1 || page > 10000 || !authToken || state.currentSection !== 'deletionReview') return;
+  const token = authToken, generation = deletionReview.generation, uploadsGeneration = ++deletionReview.uploadsGeneration;
+  const current = () => token === authToken && generation === deletionReview.generation
+    && uploadsGeneration === deletionReview.uploadsGeneration && state.currentSection === 'deletionReview';
+  for (const id of ['mediaUploadsList', 'mediaUploadsPagination']) document.getElementById(id).innerHTML = '';
+  setText('mediaUploadsStatus', '正在读取图片上传登记…');
+  try {
+    const data = await readDeletionReview(`/media-uploads?page=${page}`, token);
+    if (!current()) return;
+    if (data.readOnly !== true || data.executionEnabled !== false || data.objectDeletionAuthorized !== false
+      || data.page !== page || data.pageSize !== 25 || !deletionCount(data.total)
+      || !Array.isArray(data.uploads) || data.uploads.length > 25 || data.total < data.uploads.length
+      || new Set(data.uploads.map(row => row?.id)).size !== data.uploads.length
+      || data.uploads.some(row => !row || !deletionRequestIdPattern.test(row.id)
+        || !['PENDING', 'AVAILABLE', 'VERIFY_REQUIRED'].includes(row.status)
+        || !['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/heic', 'image/heif'].includes(row.contentType)
+        || !deletionCount(row.byteSize) || row.byteSize < 1 || row.byteSize > 10485760 || !deletionCount(row.activeReferences)
+        || !deletionDate(row.createdAt) || (row.status === 'AVAILABLE'
+          ? !deletionDate(row.confirmedAt) || Date.parse(row.confirmedAt) < Date.parse(row.createdAt) : row.confirmedAt !== null)
+        || !mediaVerificationValid(row.verification, row.createdAt)
+        || row.disposition !== 'RETAIN_PENDING_RECONCILIATION')) throw new Error('DELETION_INVALID_RESPONSE');
+    const labels = { PENDING: '上传结果待确认', AVAILABLE: '上传已确认', VERIFY_REQUIRED: '上传结果待核查' };
+    document.getElementById('mediaUploadsList').innerHTML = data.uploads.map(row => `<div class="card">
+      <p class="font-medium">${labels[row.status]}</p>
+      <p class="text-sm text-gray-600 mt-2">登记时间：${escapeHtml(formatDateTime(row.createdAt))} · 图片大小：${Math.ceil(row.byteSize / 1024)} KB</p>
+      <p class="text-sm text-gray-600 mt-2">已登记的使用位置：${row.activeReferences} 处</p>
+      <p class="text-sm text-gray-600 mt-2">${escapeHtml(mediaVerificationLabel(row.verification))}</p>
+      <p class="text-sm text-amber-800 mt-2">图片继续保留；清理前仍需核查其他引用、保全、缓存与备份。</p></div>`).join('');
+    setText('mediaUploadsStatus', data.total === 0 ? '目前没有图片上传登记；历史图片来源仍需另行核查。'
+      : data.uploads.length === 0 ? '本页已无记录，请返回上一页。' : `共有 ${data.total} 项上传登记。此页面只供核查。`);
+    renderPagination('mediaUploadsPagination', page, Math.min(10000, Math.ceil(data.total / 25)), loadMediaUploads);
+  } catch (error) { if (current()) setText('mediaUploadsStatus', deletionReviewMessage(error)); }
+}
+
+// Separate execution queue: only user-confirmed erasures, never generic
+// "approve deletion" checkboxes on a read-only dependency preview.
+let erasureGeneration = 0;
+const erasureRows = new Map();
+function validErasure(row) {
+  return row && deletionRequestIdPattern.test(row.id) && ['MEDIA_PENDING','COMPLETE'].includes(row.state)
+    && row.onlineRemoved === true && row.onlineCompleted === (row.state === 'COMPLETE')
+    && deletionDate(row.deadlineAt) && typeof row.message === 'string' && row.message.length <= 1000;
+}
+async function loadErasureRequests(page = 1) {
+  if (!Number.isSafeInteger(page) || page < 1 || page > 10000 || state.currentSection !== 'deletionReview') return;
+  const token = authToken, marker = ++erasureGeneration;
+  const current = () => authToken === token && erasureGeneration === marker && state.currentSection === 'deletionReview';
+  erasureRows.clear();
+  document.getElementById('erasureRequests').replaceChildren();
+  document.getElementById('erasurePagination').replaceChildren();
+  setText('erasureStatus', '正在读取图片处理进度…');
+  try {
+    const data = await readDeletionReview(`/erasures?page=${page}`, token);
+    if (!current()) return;
+    if (!Array.isArray(data.rows) || data.rows.length > 25 || !deletionCount(data.total) || data.page !== page
+      || data.pageSize !== 25 || data.rows.some(row => !validErasure(row))
+      || new Set(data.rows.map(row => row.id)).size !== data.rows.length) throw new Error('DELETION_INVALID_RESPONSE');
+    for (const row of data.rows) erasureRows.set(row.id, { row, page, token, marker });
+    document.getElementById('erasureRequests').innerHTML = data.rows.map(row => `<div class="border rounded p-3">
+      <p>申请 ${escapeHtml(row.id)}</p>
+      <p class="text-sm ${Date.parse(row.deadlineAt) < Date.now() ? 'text-red-600' : 'text-gray-600'}">目标日期：${escapeHtml(formatDateTime(row.deadlineAt))}</p>
+      <p class="text-sm">${row.code === 'UPLOAD_SETTLING' ? '正在等待刚才的上传结束，请两分钟后继续。' : row.code === 'MEDIA_RETRY_REQUIRED' ? '存储处理未确认完成，请检查存储配置后继续。' : '登记图片待清理。'}</p>
+      <button type="button" class="btn-red mt-2" data-erasure="${row.id}" onclick="processErasureRequest('${row.id}')">处理下一批图片</button>
+      </div>`).join('');
+    setText('erasureStatus', data.total ? `共 ${data.total} 份待处理；此操作会实际删除对应用户的登记图片。` : '没有待处理的图片清理。');
+    renderPagination('erasurePagination', page, Math.min(10000, Math.ceil(data.total / 25)), loadErasureRequests);
+  } catch (error) { if (current()) setText('erasureStatus', '未能读取图片清理队列，可能尚未启用。请稍后刷新。'); }
+}
+async function processErasureRequest(id) {
+  const selected = erasureRows.get(id);
+  if (!selected || selected.token !== authToken || selected.marker !== erasureGeneration || state.currentSection !== 'deletionReview') return;
+  if (!confirm('此用户已确认注销。现在实际清理下一批登记图片？这不会删除其他账号的图片。')) return;
+  const { token, marker, page } = selected;
+  const current = () => token === authToken && marker === erasureGeneration && state.currentSection === 'deletionReview';
+  if (!current()) return;
+  document.querySelectorAll('[data-erasure]').forEach(button => { button.disabled = true; });
+  const controller = new AbortController(); deletionReview.controllers.add(controller);
+  const timeout = setTimeout(() => controller.abort(), 60000);
+  try {
+    const response = await fetch(`${API_BASE_URL}/admin/account-deletion-requests/erasures/${id}/process`, {
+      method: 'POST', body: '{}', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+      credentials: 'omit', cache: 'no-store', redirect: 'error', signal: controller.signal,
+    });
+    const data = await response.json();
+    if (!current()) return;
+    if (!response.ok || !validErasure(data.receipt) || data.receipt.id !== id) throw new Error('ERASURE_UNKNOWN');
+    await loadErasureRequests(page);
+  } catch {
+    if (current()) setText('erasureStatus', '本次结果未确认，可能已有部分图片处理完成。请先“查看待处理”刷新结果，再决定是否继续。');
+  } finally { clearTimeout(timeout); deletionReview.controllers.delete(controller); }
+}

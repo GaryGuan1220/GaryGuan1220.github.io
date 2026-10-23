@@ -44,20 +44,48 @@
         <nav class="py-4">
           <a href="#" onclick="showSection('dashboard')" class="menu-item active"><i class="fas fa-chart-line mr-3"></i>数据统计</a>
           <a href="#" onclick="showSection('users')" class="menu-item"><i class="fas fa-users mr-3"></i>用户管理</a>
+          <a href="#" onclick="showSection('deletionReview')" class="menu-item"><i class="fas fa-user-shield mr-3"></i>注销核查</a>
+          <a href="#" onclick="showSection('privacyMaintenance')" class="menu-item"><i class="fas fa-list-check mr-3"></i>资料维护</a>
           <a href="#" onclick="showSection('reports')" class="menu-item"><i class="fas fa-flag mr-3"></i>举报处理</a>
           <a href="#" onclick="showSection('feedbacks')" class="menu-item"><i class="fas fa-bug mr-3"></i>反馈管理</a>
           <a href="#" onclick="showSection('items')" class="menu-item"><i class="fas fa-box mr-3"></i>商品管理</a>
+          <a href="#" onclick="showSection('listingReview')" class="menu-item"><i class="fas fa-clipboard-check mr-3"></i>发布审核</a>
           <a href="#" onclick="showSection('orders')" class="menu-item"><i class="fas fa-receipt mr-3"></i>订单管理</a>
           <a href="#" onclick="showSection('transactions')" class="menu-item"><i class="fas fa-money-bill-wave mr-3"></i>交易管理</a>
           <a href="#" onclick="showSection('disputes')" class="menu-item"><i class="fas fa-scale-balanced mr-3"></i>纠纷处理</a>
           <a href="#" onclick="showSection('offline')" class="menu-item"><i class="fas fa-truck-fast mr-3"></i>线下服务</a>
           <a href="#" onclick="showSection('commercialization')" class="menu-item"><i class="fas fa-coins mr-3"></i>商业化管理</a>
+          <a href="#" onclick="showSection('withdrawals')" class="menu-item"><i class="fas fa-university mr-3"></i>提现管理</a>
           <a href="#" onclick="showSection('config')" class="menu-item"><i class="fas fa-sliders mr-3"></i>系统配置</a>
           <a href="#" onclick="showSection('logs')" class="menu-item"><i class="fas fa-shield-alt mr-3"></i>操作日志</a>
         </nav>
       </aside>
 
       <main class="flex-1 min-w-0 p-6 lg:p-8 space-y-8">
+        <section id="privacyMaintenanceSection" class="section hidden">
+          <div class="flex justify-between items-center mb-4"><h2 class="text-3xl font-bold">资料维护</h2>
+            <button type="button" class="btn-gray" onclick="loadPrivacyMaintenance()">刷新状态</button></div>
+          <p id="privacyMaintenanceStatus" role="status" aria-live="polite"></p>
+          <div id="privacyMaintenanceJobs" class="space-y-3 my-4"></div>
+          <h3 class="text-lg font-semibold my-4">未提交的举报附件</h3>
+          <p class="text-sm text-gray-600 mb-4">只处理尚未绑定举报的附件。已提交附件仍按原权限保留；上传结果不明时先核查。</p>
+          <div id="privacyMaintenanceEvidence" class="space-y-3"></div>
+          <div id="privacyMaintenancePages" class="flex gap-2 mt-4"></div>
+        </section>
+        <section id="listingReviewSection" class="section hidden">
+          <div class="flex justify-between items-center mb-4"><h2 class="text-3xl font-bold">发布审核</h2>
+            <button type="button" class="btn-gray" onclick="refreshListingReviewView()">刷新</button></div>
+          <p class="text-sm text-gray-600 mb-4">核查文字及全部图片后填写决定理由。审核通过后，由卖家重新提交发布。</p>
+          <div class="flex flex-wrap gap-2 mb-4" aria-label="审核与申诉队列">
+            <button type="button" class="btn-gray" onclick="loadListingReviews()">当前待审核</button>
+            <button type="button" class="btn-gray" onclick="loadExpiredListingAppeals(1, 'PENDING')">过期未决申诉</button>
+            <button type="button" class="btn-gray" onclick="loadExpiredListingAppeals(1, 'CLOSED')">已结案申诉</button>
+          </div>
+          <p id="listingReviewStatus" role="status" aria-live="polite"></p>
+          <div id="listingReviewList" class="space-y-3 mt-4"></div>
+          <div id="listingReviewPages" class="flex gap-2 mt-4"></div>
+          <div id="listingReviewDetail" class="mt-6" aria-live="polite"></div>
+        </section>
         <section id="dashboardSection" class="section">
           <div class="flex justify-between items-center mb-6">
             <h2 class="text-3xl font-bold">数据统计</h2>
@@ -75,7 +103,7 @@
             </div>
           </div>
 
-          <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-6 gap-4 mb-6">
+          <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-7 gap-4 mb-6">
             <div class="card"><p class="label">总用户数</p><p id="totalUsers" class="metric">-</p></div>
             <div class="card"><p class="label">活跃商品</p><p id="activeItems" class="metric">-</p></div>
             <div class="card"><p class="label">总订单数</p><p id="totalOrders" class="metric">-</p></div>
@@ -100,6 +128,7 @@
             <div class="card"><p class="label">置顶收入</p><p id="pinRevenue" class="metric-sm">-</p></div>
             <div class="card"><p class="label">会员收入</p><p id="membershipRevenue" class="metric-sm">-</p></div>
             <div class="card"><p class="label">线下服务待处理</p><p id="offlineServicePendingCount" class="metric-sm">-</p></div>
+            <div class="card"><p class="label">待处理提现</p><p id="pendingWithdrawals" class="metric-sm">-</p><p id="pendingWithdrawalAmount" class="text-xs text-gray-500 mt-1">-</p></div>
           </div>
 
           <div class="grid grid-cols-1 xl:grid-cols-2 gap-4">
@@ -118,6 +147,59 @@
                 <div class="rounded border border-dashed border-gray-300 p-3">交易额趋势</div>
               </div>
             </div>
+          </div>
+        </section>
+
+        <section id="deletionReviewSection" class="section hidden">
+          <div class="section-header">
+            <h2 class="title">注销核查</h2>
+            <button type="button" onclick="loadDeletionRequests(1)" class="btn-gray">刷新申请</button>
+          </div>
+          <p class="rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 mb-4">普通核查预览只读。已由用户确认注销的图片清理，在下面独立队列中处理；不能仅凭勾选标记完成。</p>
+          <div class="card mb-6">
+            <div class="section-header"><h3 class="font-semibold text-lg">已注销账号的图片清理</h3>
+              <button type="button" onclick="loadErasureRequests(1)" class="btn-gray">查看待处理</button></div>
+            <p class="text-sm text-gray-600 mb-3">账号身份及本人内容已移除。每次最多处理3份登记图片；存储确认删除后才更新结果。失败可重新读取进度再继续。目标日期临近或已过期的申请优先处理。</p>
+            <p id="erasureStatus" role="status" aria-live="polite"></p>
+            <div id="erasureRequests" class="space-y-3 mt-3"></div>
+            <div id="erasurePagination" class="flex gap-2 mt-3"></div>
+          </div>
+          <p id="deletionReviewStatus" role="status" aria-live="polite" class="text-sm text-gray-600 mb-4"></p>
+          <div id="deletionRequestsList" class="space-y-3"></div>
+          <div id="deletionRequestsPagination" class="flex gap-2 mt-4"></div>
+          <div id="deletionPlanDetail" role="region" aria-label="注销核查预览" aria-live="polite" class="mt-6"></div>
+          <div class="mt-8 border-t pt-6">
+            <div class="section-header"><h3 class="font-semibold text-lg">处理任务记录</h3>
+              <button type="button" onclick="loadDeletionJobs(1)" class="btn-gray">查看任务记录</button></div>
+            <p class="text-sm text-gray-600 mb-3">查看排队、暂停和处理进度。线上资料移除后，仍需核实备份处理。</p>
+            <p id="deletionJobsStatus" role="status" aria-live="polite" class="text-sm text-gray-600 mb-4"></p>
+            <div id="deletionJobsList" class="space-y-3"></div>
+            <div id="deletionJobsPagination" class="flex gap-2 mt-4"></div>
+          </div>
+          <div class="mt-8 border-t pt-6">
+            <div class="section-header"><h3 class="font-semibold text-lg">资料保全登记</h3>
+              <button type="button" onclick="loadRetentionHolds(1)" class="btn-gray">查看保全登记</button></div>
+            <p class="text-sm text-gray-600 mb-3">查看需继续保留的具体资料和复核时间。解除保全后仍需核查原保留期限及其他保全事项。</p>
+            <p id="retentionHoldsStatus" role="status" aria-live="polite" class="text-sm text-gray-600 mb-4"></p>
+            <div id="retentionHoldsList" class="space-y-3"></div>
+            <div id="retentionHoldsPagination" class="flex gap-2 mt-4"></div>
+          </div>
+          <div class="mt-8 border-t pt-6">
+            <div class="section-header"><h3 class="font-semibold text-lg">消息内容清理记录</h3>
+              <button type="button" onclick="loadContentCleanups(1)" class="btn-gray">查看消息清理记录</button></div>
+            <p class="text-sm text-gray-600 mb-3">正文清理不代表账号注销完成。关联图片会保留核查，缓存与备份仍需分别处理。</p>
+            <p id="contentCleanupsStatus" role="status" aria-live="polite" class="text-sm text-gray-600 mb-4"></p>
+            <div id="contentCleanupsList" class="space-y-3"></div>
+            <div id="contentCleanupsPagination" class="flex gap-2 mt-4"></div>
+            <div id="contentMediaDetail" role="region" aria-label="关联图片核查" aria-live="polite" class="mt-4"></div>
+          </div>
+          <div class="mt-8 border-t pt-6">
+            <div class="section-header"><h3 class="font-semibold text-lg">图片上传登记</h3>
+              <button type="button" onclick="loadMediaUploads(1)" class="btn-gray">查看图片上传登记</button></div>
+            <p class="text-sm text-gray-600 mb-3">查看上传结果及已登记的使用位置。没有使用位置，也需要核查后才能清理。</p>
+            <p id="mediaUploadsStatus" role="status" aria-live="polite" class="text-sm text-gray-600 mb-4"></p>
+            <div id="mediaUploadsList" class="space-y-3"></div>
+            <div id="mediaUploadsPagination" class="flex gap-2 mt-4"></div>
           </div>
         </section>
 
@@ -275,6 +357,7 @@
           <div class="card p-4 mb-4 grid grid-cols-1 xl:grid-cols-9 gap-3">
             <select id="feedbackType" class="input">
               <option value="">全部类型</option>
+              <option value="ORDER_ISSUE">自取交易问题</option>
               <option value="BUG">报告Bug</option>
               <option value="FEATURE">功能建议</option>
               <option value="REPORT">商品/用户举报</option>
@@ -529,7 +612,7 @@
           </div>
 
           <div class="mb-8">
-            <h3 class="text-xl font-bold mb-3">取消订单纠纷</h3>
+            <h3 class="text-xl font-bold mb-3">订单纠纷</h3>
             <div id="disputesOrdersList" class="space-y-3"></div>
           </div>
 
@@ -570,6 +653,8 @@
               </div>
             </div>
 
+            <div id="movingPlatformDeliveryBanner" class="hidden mb-3"></div>
+
             <div class="card p-4 mb-3 grid grid-cols-1 xl:grid-cols-8 gap-3">
               <input id="movingKeyword" type="text" placeholder="地址/联系人/备注" class="input xl:col-span-2" />
               <select id="movingStatus" class="input">
@@ -605,8 +690,8 @@
             <div id="movingWorkflowPanel" class="card p-4 mb-3 border border-red-100">
               <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
                 <div>
-                  <h4 class="text-lg font-semibold">配送流程工作台</h4>
-                  <p class="text-xs text-gray-500">页内完成分配配送员、报价、取货、送达等流程，不再使用弹窗。</p>
+                  <h4 class="text-lg font-semibold">配送/搬运记录（只读）</h4>
+                  <p class="text-xs text-gray-500">当前 V1 不提供配送、搬运或仓储状态推进；记录仅用于审计和历史查看。</p>
                 </div>
                 <button onclick="resetMovingWorkflowPanel()" class="btn-gray">清空选择</button>
               </div>
@@ -628,9 +713,9 @@
 
               <div class="grid grid-cols-1 xl:grid-cols-2 gap-3">
                 <div>
-                  <label class="text-xs text-gray-600 block mb-1">下一步动作</label>
+                  <label class="text-xs text-gray-600 block mb-1">状态推进</label>
                   <select id="movingWorkflowTargetStatus" class="input" onchange="handleMovingWorkflowStatusChange()">
-                    <option value="">请选择服务后可操作</option>
+                    <option value="">当前 V1 为只读</option>
                   </select>
                 </div>
                 <div>
@@ -662,60 +747,50 @@
                 </div>
                 <div id="movingWorkflowEstimatedPickupAtRow" class="hidden">
                   <label class="text-xs text-gray-600 block mb-1">预计取货时间</label>
-                  <input id="movingWorkflowEstimatedPickupAt" type="hidden" />
-                  <div class="time-wheel-panel">
-                    <input
-                      id="movingWorkflowEstimatedPickupAtDate"
-                      type="date"
-                      class="input"
-                      onchange="syncTimeWheelFromDate('movingWorkflowEstimatedPickupAt')"
-                    />
-                    <div class="time-wheel-preview">
-                      <span id="movingWorkflowEstimatedPickupAtPreview">未选择</span>
-                      <button type="button" class="time-wheel-clear" onclick="clearTimeWheel('movingWorkflowEstimatedPickupAt')">清空</button>
-                    </div>
-                    <div class="time-wheel-grid">
-                      <div>
-                        <p class="time-wheel-label">小时</p>
-                        <div id="movingWorkflowEstimatedPickupAtHourWheel" class="time-wheel-list" tabindex="0" aria-label="预计取货小时"></div>
-                      </div>
-                      <div>
-                        <p class="time-wheel-label">分钟</p>
-                        <div id="movingWorkflowEstimatedPickupAtMinuteWheel" class="time-wheel-list" tabindex="0" aria-label="预计取货分钟"></div>
-                      </div>
-                    </div>
+                  <input
+                    id="movingWorkflowEstimatedPickupAt"
+                    type="datetime-local"
+                    class="input"
+                    onchange="syncTimeWheelValue('movingWorkflowEstimatedPickupAt')"
+                  />
+                  <div class="time-wheel-preview mt-2">
+                    <span id="movingWorkflowEstimatedPickupAtPreview">未选择</span>
+                    <button type="button" class="time-wheel-clear" onclick="clearTimeWheel('movingWorkflowEstimatedPickupAt')">清空</button>
                   </div>
+                  <p class="text-[11px] text-gray-500 mt-1">请选择精确到分钟的预计取货时间，提交后会同步到 App。</p>
                 </div>
 
                 <div id="movingWorkflowEstimatedDeliveryAtRow" class="hidden">
                   <label class="text-xs text-gray-600 block mb-1">预计送达时间</label>
-                  <input id="movingWorkflowEstimatedDeliveryAt" type="hidden" />
-                  <div class="time-wheel-panel">
-                    <input
-                      id="movingWorkflowEstimatedDeliveryAtDate"
-                      type="date"
-                      class="input"
-                      onchange="syncTimeWheelFromDate('movingWorkflowEstimatedDeliveryAt')"
-                    />
-                    <div class="time-wheel-preview">
-                      <span id="movingWorkflowEstimatedDeliveryAtPreview">未选择</span>
-                      <button type="button" class="time-wheel-clear" onclick="clearTimeWheel('movingWorkflowEstimatedDeliveryAt')">清空</button>
-                    </div>
-                    <div class="time-wheel-grid">
-                      <div>
-                        <p class="time-wheel-label">小时</p>
-                        <div id="movingWorkflowEstimatedDeliveryAtHourWheel" class="time-wheel-list" tabindex="0" aria-label="预计送达小时"></div>
-                      </div>
-                      <div>
-                        <p class="time-wheel-label">分钟</p>
-                        <div id="movingWorkflowEstimatedDeliveryAtMinuteWheel" class="time-wheel-list" tabindex="0" aria-label="预计送达分钟"></div>
-                      </div>
-                    </div>
+                  <input
+                    id="movingWorkflowEstimatedDeliveryAt"
+                    type="datetime-local"
+                    class="input"
+                    onchange="syncTimeWheelValue('movingWorkflowEstimatedDeliveryAt')"
+                  />
+                  <div class="time-wheel-preview mt-2">
+                    <span id="movingWorkflowEstimatedDeliveryAtPreview">未选择</span>
+                    <button type="button" class="time-wheel-clear" onclick="clearTimeWheel('movingWorkflowEstimatedDeliveryAt')">清空</button>
                   </div>
+                  <p class="text-[11px] text-gray-500 mt-1">请选择精确到分钟的预计送达时间，提交后会同步到 App。</p>
                 </div>
                 <div id="movingWorkflowPickupPhotosRow" class="hidden xl:col-span-2">
-                  <label class="text-xs text-gray-600 block mb-1">取货照片（可多张，填写图片 URL，逗号或换行分隔）</label>
+                  <label class="text-xs text-gray-600 block mb-1">取货照片/文件（可多张，支持上传或粘贴 URL，逗号或换行分隔）</label>
+                  <div class="flex flex-wrap gap-2 mb-2">
+                    <button type="button" class="btn-secondary" onclick="document.getElementById('movingWorkflowPickupUploadFiles')?.click()">
+                      上传照片/文件
+                    </button>
+                    <span class="text-[11px] text-gray-500 self-center">支持图片、PDF、Word 等常见文件</span>
+                  </div>
                   <textarea id="movingWorkflowPickupPhotos" rows="2" class="input" placeholder="https://..."></textarea>
+                  <input
+                    id="movingWorkflowPickupUploadFiles"
+                    type="file"
+                    class="hidden"
+                    multiple
+                    accept="image/*,.pdf,.doc,.docx,.png,.jpg,.jpeg,.webp"
+                    onchange="handleMovingWorkflowPickupUpload(event)"
+                  />
                 </div>
 
                 <div id="movingWorkflowDeliveryPhotosRow" class="hidden xl:col-span-2">
@@ -725,15 +800,9 @@
               </div>
 
               <div class="flex flex-wrap items-center justify-between gap-3 mt-3">
-                <p id="movingWorkflowHint" class="text-xs text-gray-500">请选择服务和动作后提交。</p>
-                <button id="movingWorkflowSubmitBtn" onclick="submitMovingWorkflow()" class="btn-red" disabled>提交流程更新</button>
+                <p id="movingWorkflowHint" class="text-xs text-gray-500">当前 V1 为只读，不能通过后台修改状态。</p>
+                <button id="movingWorkflowSubmitBtn" class="btn-gray" disabled>状态修改已停用</button>
               </div>
-            </div>
-
-            <div class="mb-2 flex items-center gap-2 text-sm">
-              <input id="selectAllMoving" type="checkbox" onchange="toggleSelectAllMoving(this.checked)" />
-              <label for="selectAllMoving">全选当前页</label>
-              <span class="text-gray-500">已选 <span id="movingSelectedCount">0</span> 条</span>
             </div>
 
             <div id="movingServicesList" class="space-y-3"></div>
@@ -746,11 +815,7 @@
           <div class="mb-8">
             <div class="flex justify-between items-center mb-3">
               <h3 class="text-xl font-bold">仓储订单</h3>
-              <div class="flex gap-2">
-                <button onclick="batchUpdateStorageStatus('ACTIVE')" class="btn-gray">批量激活</button>
-                <button onclick="batchUpdateStorageStatus('COMPLETED')" class="btn-gray">批量完成</button>
-                <button onclick="batchUpdateStorageStatus('EXPIRED')" class="btn-gray">批量过期</button>
-              </div>
+              <span class="text-sm text-gray-500">当前 V1 仅可查看</span>
             </div>
 
             <div class="card p-4 mb-3 grid grid-cols-1 xl:grid-cols-5 gap-3">
@@ -765,12 +830,6 @@
               <input id="storageDateTo" type="date" class="input" />
               <div></div>
               <button onclick="loadStorageOrders(1)" class="btn-red">筛选</button>
-            </div>
-
-            <div class="mb-2 flex items-center gap-2 text-sm">
-              <input id="selectAllStorage" type="checkbox" onchange="toggleSelectAllStorage(this.checked)" />
-              <label for="selectAllStorage">全选当前页</label>
-              <span class="text-gray-500">已选 <span id="storageSelectedCount">0</span> 条</span>
             </div>
 
             <div id="storageOrdersList" class="space-y-3"></div>
@@ -842,6 +901,7 @@
         </section>
 
         <section id="commercializationSection" class="section hidden">
+          <div id="paymentsCommercializationBanner" class="rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 mb-4">线上支付和付费权益购买暂未开放，历史记录只读。</div>
           <div class="section-header">
             <h2 class="title">商业化管理</h2>
             <div class="flex gap-2">
@@ -903,7 +963,7 @@
                 <div id="membershipsPagination" class="pagination"></div>
               </div>
               <div class="mt-4">
-                <button onclick="openGrantMembershipPrompt()" class="btn-gray mr-2">手动开通会员</button>
+                <button onclick="openGrantMembershipPrompt()" class="btn-gray mr-2">赠送会员（不收款）</button>
                 <button onclick="openGrantRewardPrompt()" class="btn-red">发放奖励</button>
               </div>
             </div>
@@ -922,24 +982,74 @@
           </div>
         </section>
 
+        <section id="withdrawalsSection" class="section hidden">
+          <div id="paymentsWithdrawalsBanner" class="rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 mb-4">线上支付和付费权益购买暂未开放，历史记录只读。</div>
+          <div class="section-header">
+            <h2 class="title">提现管理</h2>
+            <div class="flex gap-2">
+              <button onclick="clearSectionFilters('withdrawals')" class="btn-gray">清空筛选</button>
+              <button onclick="loadWithdrawalsSection()" class="btn-dark">刷新</button>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 mb-6">
+            <div class="card"><p class="label">提现申请总数</p><p id="withdrawalsTotalCount" class="metric-sm">-</p></div>
+            <div class="card"><p class="label">提现申请总额</p><p id="withdrawalsTotalAmount" class="metric-sm">-</p></div>
+            <div class="card"><p class="label">当前筛选数量</p><p id="withdrawalsRequestCount" class="metric-sm">-</p></div>
+            <div class="card"><p class="label">筛选说明</p><p id="withdrawalsSummaryLabel" class="metric-sm">-</p></div>
+          </div>
+
+          <div class="card p-4 mb-4">
+            <div class="grid grid-cols-1 md:grid-cols-5 gap-3">
+              <input id="withdrawalSearch" class="input md:col-span-2" placeholder="用户 / 银行 / 账号 / 备注" />
+              <select id="withdrawalStatus" class="input">
+                <option value="">全部状态</option>
+                <option value="PENDING">PENDING</option>
+                <option value="PAID">PAID</option>
+                <option value="REJECTED">REJECTED</option>
+                <option value="FAILED">FAILED</option>
+              </select>
+              <select id="withdrawalSortOrder" class="input">
+                <option value="desc">最近优先</option>
+                <option value="asc">最早优先</option>
+              </select>
+              <button onclick="loadWithdrawals(1)" class="btn-red">筛选</button>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
+              <input id="withdrawalDateFrom" type="date" class="input" />
+              <input id="withdrawalDateTo" type="date" class="input" />
+            </div>
+            <p id="withdrawalsHint" class="mt-3 text-xs text-gray-500">历史提现记录只读，当前不能打款、驳回或标记失败。</p>
+          </div>
+
+          <div id="withdrawalsList" class="space-y-2 text-sm"></div>
+          <div class="pagination-wrap">
+            <div class="text-sm text-gray-600">共 <span id="withdrawalsTotalCountFooter">0</span> 条</div>
+            <div id="withdrawalsPagination" class="pagination"></div>
+          </div>
+        </section>
+
         <section id="configSection" class="section hidden">
+          <div id="paymentsConfigBanner" class="rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 mb-4">线上支付和付费权益购买暂未开放，历史记录只读。</div>
           <div class="section-header">
             <h2 class="title">系统配置 / 功能开关</h2>
             <button onclick="loadFeatureFlags()" class="btn-dark">刷新</button>
           </div>
           <div class="card p-4 space-y-4">
+            <div id="platformDeliveryFlagBanner" class="hidden"></div>
+
             <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
               <label class="flex items-center justify-between p-3 border rounded">
                 <span>开启多商品发布</span>
                 <input id="flagBatchPublishEnabled" type="checkbox" />
               </label>
               <label class="flex items-center justify-between p-3 border rounded">
-                <span>开启付费置顶</span>
-                <input id="flagPaidPinEnabled" type="checkbox" />
+                <span>付费置顶状态（只读）</span>
+                <input id="flagPaidPinEnabled" type="checkbox" disabled aria-label="付费置顶状态，不能在此启用" />
               </label>
               <label class="flex items-center justify-between p-3 border rounded">
-                <span>开启会员购买</span>
-                <input id="flagMembershipPurchaseEnabled" type="checkbox" />
+                <span>会员购买状态（只读）</span>
+                <input id="flagMembershipPurchaseEnabled" type="checkbox" disabled aria-label="会员购买状态，不能在此启用" />
               </label>
               <label class="flex items-center justify-between p-3 border rounded">
                 <span>开启反馈奖励</span>
@@ -989,7 +1099,7 @@
     <div id="detailDrawerBody" class="p-4 space-y-3 text-sm"></div>
   </aside>
 
-  <script src="app.js?v=20260603.2"></script>
+  <script src="app.js?v=20261016-media-registry"></script>
 </body>
 </html>
 
