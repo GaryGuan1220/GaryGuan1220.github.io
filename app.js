@@ -1455,7 +1455,7 @@ function ensureAdminDialog() {
               <i class="fas fa-shield-halved"></i>
             </div>
             <div class="min-w-0">
-              <p class="text-[11px] font-semibold uppercase tracking-[0.24em] text-white/70">CReuse Admin Workflow</p>
+              <p class="text-[11px] font-semibold uppercase tracking-[0.24em] text-white/70">ReOwn Admin Workflow</p>
               <h3 id="adminModalTitle" class="mt-1 text-2xl font-bold tracking-tight text-white">确认操作</h3>
               <p id="adminModalSubtitle" class="mt-1 text-sm leading-6 text-white/80"></p>
             </div>
