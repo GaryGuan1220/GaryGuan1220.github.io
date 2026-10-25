@@ -44,6 +44,8 @@ const state = {
   movingWorkflowDefaultQuote: 0,
   movingWorkflowSubmitting: false,
   featureFlags: {
+    loaded: false,
+    legacyItemReviewEnabled: false,
     paymentsEnabled: false,
     platformDeliveryEnabled: false,
     platformDeliveryMessage: '',
@@ -373,7 +375,9 @@ function renderPaymentsNoticeBanners() {
   for (const id of ['paymentsCommercializationBanner', 'paymentsWithdrawalsBanner', 'paymentsConfigBanner']) {
     const el = document.getElementById(id);
     if (!el) continue;
-    el.textContent = paymentsUnavailableMessage;
+    el.textContent = id === 'paymentsCommercializationBanner'
+      ? '线上支付和付费权益购买暂未开放。历史支付记录只读；下方赠送权益、取消或延长置顶属于不收款的权益调整。'
+      : paymentsUnavailableMessage;
     el.className = paymentsAreEnabled() ? 'hidden' : 'rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 mb-4';
   }
   setText('withdrawalsHint', paymentsAreEnabled() ? '点击提现记录可展开详情与处理动作。' : '历史提现记录只读，当前不能打款、驳回或标记失败。');
@@ -694,6 +698,84 @@ function renderLogDetailsSummary(details) {
   `;
 }
 
+const adminDisplayLabels = {
+  "normal": "正常",
+  "banned": "已封禁",
+  "user": "普通用户",
+  "admin": "管理员",
+  "PENDING": "待处理",
+  "HANDLED": "已处理",
+  "REJECTED": "已拒绝",
+  "ITEM": "商品",
+  "USER": "用户",
+  "ORDER": "订单",
+  "TRADE": "买卖交易",
+  "pending": "待处理",
+  "in_progress": "处理中",
+  "need_more_info": "待补充信息",
+  "confirmed": "已确认",
+  "duplicate": "重复",
+  "invalid": "无效",
+  "fixed": "已修复",
+  "accepted": "已采纳",
+  "closed": "已关闭",
+  "low": "低",
+  "medium": "中",
+  "high": "高",
+  "critical": "紧急",
+  "none": "无奖励",
+  "granted": "已发放",
+  "not_granted": "未发放",
+  "ACTIVE": "在售",
+  "RESERVED": "交易占用",
+  "SOLD": "已售出",
+  "PAUSED": "已暂停",
+  "WITHDRAWN": "已下架",
+  "PENDING_REVIEW": "旧版待审核",
+  "REMOVED_BY_ADMIN": "管理员移除",
+  "PAID": "已付款",
+  "SHIPPED": "已发货",
+  "COMPLETED": "已完成",
+  "CANCELED": "已取消",
+  "DISPUTED": "争议中",
+  "PAYMENT": "付款",
+  "REFUND": "退款",
+  "FEE": "费用",
+  "DEPOSIT": "入账",
+  "FAILED": "失败",
+  "CONFIRMED": "已确认",
+  "IN_PROGRESS": "进行中",
+  "CREATED": "已创建",
+  "EXPIRED": "已过期",
+  "CANCELLED": "已取消",
+  "LOW": "低",
+  "MEDIUM": "中",
+  "HIGH": "高",
+  "SELF_PICKUP": "自取",
+  "PLATFORM_DELIVERY": "平台配送",
+  "LEGACY_UNKNOWN": "历史记录，方式未确认",
+  "OFFLINE_C2C": "买卖双方线下付款",
+  "UNKNOWN": "未确认",
+  "CASH": "现金",
+  "STRIPE": "Stripe",
+  "MOCK_APPLE": "模拟 Apple 支付",
+  "SERVICE": "平台配送",
+  "MEMBERSHIP": "会员",
+  "FEATURE": "虚拟功能",
+  "RECHARGE": "充值",
+  "ADMIN": "管理员发放",
+  "SYSTEM": "系统事件",
+  "OTHER": "其他",
+  "BUG": "程序问题",
+  "REPORT": "举报",
+  "PAYMENT_PIN": "支付/置顶问题",
+  "ACCOUNT": "账号问题",
+  "ORDER_ISSUE": "自取交易问题"
+};
+function adminLabel(value) {
+  const key = String(value ?? '');
+  return Object.prototype.hasOwnProperty.call(adminDisplayLabels, key) ? adminDisplayLabels[key] : key || '-';
+}
 function formatStatusBadge(label, type = 'default') {
   const map = {
     success: 'bg-green-100 text-green-700',
@@ -1414,20 +1496,21 @@ async function apiRequest(endpoint, options = {}, expectBlob = false) {
 
   if (!response.ok) {
     let errorMessage = `请求失败 (${response.status})`;
+    let errorCode;
 
     try {
       const payload = await response.json();
       if (payload?.error) errorMessage = payload.error;
+      errorCode = payload?.code;
 
     } catch (_) {
       // ignore json parse error
     }
 
-    if (response.status === 401 || response.status === 403) {
-      throw new Error(errorMessage || '权限不足，请重新登录');
-    }
-
-    throw new Error(errorMessage);
+    const error = new Error(errorMessage);
+    error.status = response.status;
+    error.code = errorCode;
+    throw error;
   }
 
   const result = expectBlob ? await response.blob() : await response.json();
@@ -1444,7 +1527,7 @@ function ensureAdminDialog() {
   modal.innerHTML = `
     <div class="absolute inset-0" style="background: radial-gradient(circle at top, rgba(248,113,113,.25), rgba(15,23,42,.62));" data-admin-modal-close="true"></div>
     <div
-      id="adminModalPanel"
+      id="adminModalPanel" role="dialog" aria-modal="true" aria-labelledby="adminModalTitle"
       class="relative z-[81] flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-[28px] border border-white/10 bg-white shadow-[0_40px_120px_rgba(15,23,42,0.5)]"
     >
       <div class="relative overflow-hidden border-b border-white/10 bg-gradient-to-r from-slate-950 via-slate-900 to-rose-700 px-5 py-5 text-white">
@@ -1495,6 +1578,13 @@ function buildAdminModalField(field, index) {
   const helper = field.helperText
     ? `<p class="text-xs text-slate-500">${escapeHtml(field.helperText)}</p>`
     : '';
+
+  if (field.type === 'select') {
+    return `<label class="block space-y-2"><span class="block text-sm font-medium text-slate-700">${label}${requiredBadge}</span>
+      <select data-admin-modal-field-index="${index}" class="${commonInputClass}">${(field.options || []).map(option =>
+        `<option value="${escapeHtml(option.value)}" ${option.value === value ? 'selected' : ''}>${escapeHtml(option.label)}</option>`
+      ).join('')}</select>${helper}</label>`;
+  }
 
   if (field.type === 'textarea') {
     return `
@@ -1867,7 +1957,9 @@ async function downloadExport(resource) {
   }
 }
 
+let loginSubmitting = false;
 async function login() {
+  if (loginSubmitting) return;
   const email = getInputValue('loginEmail');
   const password = document.getElementById('loginPassword')?.value || '';
 
@@ -1876,6 +1968,9 @@ async function login() {
     return;
   }
 
+  loginSubmitting = true;
+  const submitButton = document.getElementById('adminLoginSubmit');
+  if (submitButton) submitButton.disabled = true;
   try {
     const response = await fetch(`${API_BASE_URL}/auth/login`, {
       method: 'POST',
@@ -1917,6 +2012,9 @@ async function login() {
     clearAdminSession();
     renderLoggedOutState({ replaceUrl: false });
     showError(`登录失败: ${error.message}`);
+  } finally {
+    loginSubmitting = false;
+    if (submitButton) submitButton.disabled = false;
   }
 }
 
@@ -1931,6 +2029,7 @@ function getAdminRootUrl() {
 
 function clearAdminSession() {
   adminResponseGeneration++;
+  state.featureFlags.loaded = false;
   clearPrivateProofPreview();
   clearDeletionReview();
   clearListingReview();
@@ -2015,7 +2114,10 @@ async function showSection(sectionName) {
     const handler = item.getAttribute('onclick') || '';
     return handler.includes(`'${sectionName}'`);
   });
-  if (activeMenu) activeMenu.classList.add('active');
+  if (activeMenu) {
+    activeMenu.classList.add('active');
+    const group = activeMenu.closest('.nav-group'); if (group) group.open = true;
+  }
 
   clearSelections();
 
@@ -2033,7 +2135,7 @@ async function showSection(sectionName) {
       await loadUsers(1);
       break;
     case 'deletionReview':
-      await loadDeletionRequests(1);
+      await loadErasureRequests(1);
       break;
     case 'reports':
       await loadReports(1);
@@ -2366,7 +2468,24 @@ async function openDeletionPlan(requestId) {
   }
 }
 
+// The current review queue is the authority; legacy Item.status statistics are not.
+async function readCurrentReviewSummary() {
+  try {
+    const data = await apiRequest('/admin/listing-reviews?page=1');
+    if (!Number.isSafeInteger(data.total) || data.total < 0) throw new Error('审核队列响应无效');
+    return { enabled: true, total: data.total };
+  } catch (error) {
+    if (error.status === 503 && error.code === 'LISTING_REVIEW_DISABLED') return { enabled: false, total: null };
+    return { enabled: null, total: null };
+  }
+}
+function reviewSummaryLabel(summary) {
+  return summary.enabled === true ? String(summary.total) : summary.enabled === false ? '未启用' : '暂不可用，请刷新';
+}
+let dashboardLoadGeneration = 0;
 async function loadDashboard() {
+  const generation = ++dashboardLoadGeneration, token = authToken;
+  setText('pendingReviewItems', '读取中…');
   const range = getInputValue('dashboardRange') || 'today';
   const dateFrom = getInputValue('dashboardDateFrom');
   const dateTo = getInputValue('dashboardDateTo');
@@ -2376,7 +2495,8 @@ async function loadDashboard() {
   if (dateTo) params.set('dateTo', dateTo);
 
   try {
-    const stats = await apiRequest(`/admin/stats?${params.toString()}`);
+    const [stats, review] = await Promise.all([apiRequest(`/admin/stats?${params.toString()}`), readCurrentReviewSummary()]);
+    if (token !== authToken || generation !== dashboardLoadGeneration) return;
     setText('totalUsers', stats.totalUsers || 0);
     setText('activeItems', stats.activeItems || 0);
     setText('totalOrders', stats.totalOrders || 0);
@@ -2390,7 +2510,7 @@ async function loadDashboard() {
     setText('todayDealAmount', formatMoney(stats.todayDealAmount || 0));
     setText('todayCompletedTrades', stats.todayCompletedTrades || 0);
     setText('pendingDisputes', stats.pendingDisputes || 0);
-    setText('pendingReviewItems', stats.pendingReviewItems || 0);
+    setText('pendingReviewItems', reviewSummaryLabel(review));
     setText('pinnedItems', stats.pinnedItems || 0);
     setText('pinRevenue', formatMoney(stats.pinRevenue || 0));
     setText('membershipRevenue', formatMoney(stats.membershipRevenue || 0));
@@ -2403,7 +2523,7 @@ async function loadDashboard() {
       <button onclick="openSectionWithPreset('reports', 'pending')" class="w-full text-left border rounded p-2 hover:bg-gray-50">待处理举报：${todos.pendingReports || 0}</button>
       <button onclick="openSectionWithPreset('feedbacks', 'pending')" class="w-full text-left border rounded p-2 hover:bg-gray-50">待处理反馈：${todos.pendingFeedbacks || 0}</button>
       <button onclick="openSectionWithPreset('disputes', 'pending')" class="w-full text-left border rounded p-2 hover:bg-gray-50">待处理纠纷：${todos.pendingDisputes || 0}</button>
-      <button onclick="openSectionWithPreset('items', 'pendingReview')" class="w-full text-left border rounded p-2 hover:bg-gray-50">待审核商品：${todos.pendingReviewItems || 0}</button>
+      <button onclick="showSection('listingReview')" class="w-full text-left border rounded p-2 hover:bg-gray-50">待审核商品：${reviewSummaryLabel(review)}</button>
       <button onclick="openSectionWithPreset('offline', 'pending')" class="w-full text-left border rounded p-2 hover:bg-gray-50">待处理线下服务：${todos.pendingOfflineServices || 0}</button>
       <button onclick="openSectionWithPreset('orders', 'pendingDispute')" class="w-full text-left border rounded p-2 hover:bg-gray-50">待处理取消订单：${todos.pendingCancelOrders || 0}</button>
       <button onclick="openSectionWithPreset('withdrawals', 'pending')" class="w-full text-left border rounded p-2 hover:bg-gray-50">待处理提现：${todos.pendingWithdrawals || 0}</button>
@@ -2412,6 +2532,8 @@ async function loadDashboard() {
     `;
     setHtml('dashboardTodos', todoHtml);
   } catch (error) {
+    if (token !== authToken || generation !== dashboardLoadGeneration) return;
+    setText('pendingReviewItems', '暂不可用，请刷新');
     const message = recoverableLoadMessage('运营统计', error);
     showError(message);
     renderRecoverableLoadError('dashboardTodos', message, loadDashboard);
@@ -2464,8 +2586,8 @@ async function loadUsers(page = 1) {
             : '<span class="text-green-700 font-semibold">正常</span>';
 
           const roleTag = user.isAdmin
-            ? '<span class="text-purple-700 font-semibold">admin</span>'
-            : '<span class="text-gray-700 font-semibold">user</span>';
+            ? '<span class="text-purple-700 font-semibold">管理员</span>'
+            : '<span class="text-gray-700 font-semibold">普通用户</span>';
 
           const memberTag =
             user.membershipLevel && !['', 'bronze', 'Bronze'].includes(user.membershipLevel)
@@ -2561,7 +2683,8 @@ async function toggleUserBan(userId, willBan) {
     reason = (await promptReason('封禁用户', true)) || '';
     if (!reason) return;
   } else {
-    reason = (await promptReason('解封用户（可选备注）', false)) ?? '';
+    reason = await promptReason('解封用户（可选备注）', false);
+    if (reason === null) return;
   }
 
   if (!(await confirmCriticalAction(willBan ? '封禁用户' : '解封用户', reason))) return;
@@ -2678,23 +2801,23 @@ async function openUserDetail(userId) {
     const user = data.user;
 
     const recentBuy = (data.recentBuyOrders || [])
-      .map((order) => `<li>#${order.id} · ${escapeHtml(order.item?.title || '未知商品')} · ${order.status}</li>`)
+      .map((order) => `<li>#${order.id} · ${escapeHtml(order.item?.title || '未知商品')} · ${escapeHtml(adminLabel(order.status))}</li>`)
       .join('');
 
     const recentSell = (data.recentSellOrders || [])
-      .map((order) => `<li>#${order.id} · ${escapeHtml(order.item?.title || '未知商品')} · ${order.status}</li>`)
+      .map((order) => `<li>#${order.id} · ${escapeHtml(order.item?.title || '未知商品')} · ${escapeHtml(adminLabel(order.status))}</li>`)
       .join('');
 
     const reportsSubmitted = (data.reportsSubmitted || [])
-      .map((report) => `<li>#${report.id} · ${escapeHtml(report.reason || '-')} · ${report.status}</li>`)
+      .map((report) => `<li>#${report.id} · ${escapeHtml(report.reason || '-')} · ${escapeHtml(adminLabel(report.status))}</li>`)
       .join('');
 
     const reportsTargeted = (data.reportsTargeted || [])
-      .map((report) => `<li>#${report.id} · ${escapeHtml(report.reason || '-')} · ${report.status}</li>`)
+      .map((report) => `<li>#${report.id} · ${escapeHtml(report.reason || '-')} · ${escapeHtml(adminLabel(report.status))}</li>`)
       .join('');
 
     const feedbacks = (data.feedbacks || [])
-      .map((feedback) => `<li>#${feedback.id} · ${escapeHtml(feedback.title || '-')} · ${feedback.status}</li>`)
+      .map((feedback) => `<li>#${feedback.id} · ${escapeHtml(feedback.title || '-')} · ${escapeHtml(adminLabel(feedback.status))}</li>`)
       .join('');
 
     const publishPermission = data.publishPermission || {};
@@ -2753,10 +2876,10 @@ async function openUserDetail(userId) {
 }
 
 function renderSlaBadge(status) {
-  if (status === 'OVERDUE') return '<span class="px-2 py-1 rounded bg-red-100 text-red-700 text-xs">OVERDUE</span>';
-  if (status === 'NEAR_DUE') return '<span class="px-2 py-1 rounded bg-amber-100 text-amber-700 text-xs">NEAR_DUE</span>';
-  if (status === 'ON_TRACK') return '<span class="px-2 py-1 rounded bg-green-100 text-green-700 text-xs">ON_TRACK</span>';
-  return '<span class="px-2 py-1 rounded bg-gray-100 text-gray-600 text-xs">NO_SLA</span>';
+  if (status === 'OVERDUE') return '<span class="px-2 py-1 rounded bg-red-100 text-red-700 text-xs">已逾期</span>';
+  if (status === 'NEAR_DUE') return '<span class="px-2 py-1 rounded bg-amber-100 text-amber-700 text-xs">即将到期</span>';
+  if (status === 'ON_TRACK') return '<span class="px-2 py-1 rounded bg-green-100 text-green-700 text-xs">期限内</span>';
+  return '<span class="px-2 py-1 rounded bg-gray-100 text-gray-600 text-xs">未设截止时间</span>';
 }
 
 function feedbackStatusBadge(status) {
@@ -2773,7 +2896,7 @@ function feedbackStatusBadge(status) {
     closed: 'bg-gray-100 text-gray-700',
   };
   const cls = styleMap[value] || 'bg-gray-100 text-gray-700';
-  return `<span class="px-2 py-1 rounded text-xs ${cls}">${escapeHtml(value || '-')}</span>`;
+  return `<span class="px-2 py-1 rounded text-xs ${cls}">${escapeHtml(adminLabel(value))}</span>`;
 }
 
 function feedbackPriorityBadge(priority) {
@@ -2785,7 +2908,7 @@ function feedbackPriorityBadge(priority) {
     critical: 'bg-red-100 text-red-700',
   };
   const cls = styleMap[value] || 'bg-gray-100 text-gray-700';
-  return `<span class="px-2 py-1 rounded text-xs ${cls}">${escapeHtml(value || '-')}</span>`;
+  return `<span class="px-2 py-1 rounded text-xs ${cls}">${escapeHtml(adminLabel(value))}</span>`;
 }
 
 function feedbackRewardBadge(rewardStatus) {
@@ -2796,7 +2919,7 @@ function feedbackRewardBadge(rewardStatus) {
     none: 'bg-slate-100 text-slate-600',
   };
   const cls = styleMap[value] || 'bg-slate-100 text-slate-600';
-  return `<span class="px-2 py-1 rounded text-xs ${cls}">${escapeHtml(value || 'none')}</span>`;
+  return `<span class="px-2 py-1 rounded text-xs ${cls}">${escapeHtml(adminLabel(value || 'none'))}</span>`;
 }
 
 function renderOrderActionButtons(order) {
@@ -2849,7 +2972,7 @@ async function loadReports(page = 1) {
       .map((report) => {
         const isChecked = state.selectedReportIds.has(report.id);
         const assignment = report.assignment
-          ? `<div class="text-xs text-gray-700">负责人：${escapeHtml(report.assignment.assigneeName)} · 优先级：${report.assignment.priority} · 截止：${
+          ? `<div class="text-xs text-gray-700">负责人：${escapeHtml(report.assignment.assigneeName)} · 优先级：${escapeHtml(adminLabel(report.assignment.priority))} · 截止：${
               report.assignment.dueAt ? formatDateTime(report.assignment.dueAt) : '-'
             }</div>`
           : '<div class="text-xs text-gray-500">未指派</div>';
@@ -2860,7 +2983,7 @@ async function loadReports(page = 1) {
               <div class="flex items-start gap-2">
                 <input type="checkbox" class="report-checkbox mt-1" ${isChecked ? 'checked' : ''} onchange="toggleReportSelection(${report.id}, this.checked)" />
                 <div>
-                  <p class="font-semibold">举报 #${report.id} · ${report.targetType}#${report.targetId}</p>
+                  <p class="font-semibold">举报 #${report.id} · ${escapeHtml(adminLabel(report.targetType))}#${report.targetId}</p>
                   <p class="text-sm text-gray-700">举报理由：${escapeHtml(report.reason || '-')}</p>
                   <p class="text-sm text-gray-700">详情：${escapeHtml(report.description || '-')}</p>
                   <p class="text-sm text-gray-700">举报人：${escapeHtml(report.reporter?.nickname || '未知')} (${escapeHtml(
@@ -2876,7 +2999,7 @@ async function loadReports(page = 1) {
                     : report.status === 'HANDLED'
                     ? 'bg-green-100 text-green-700'
                     : 'bg-gray-100 text-gray-700'
-                }">${report.status}</span>
+                }">${escapeHtml(adminLabel(report.status))}</span>
                 ${renderSlaBadge(report.slaStatus)}
               </div>
             </div>
@@ -2925,60 +3048,42 @@ function toggleSelectAllReports(checked) {
   updateSelectionCount();
 }
 
+async function requestAssignment(title) {
+  const token = authToken;
+  const result = await openAdminDialog({
+    title, subtitle: '填写后一次提交；取消或关闭不会保存。', confirmText: '确认指派', confirmVariant: 'dark',
+    fields: [
+      { name: 'assignee', label: '管理员 ID', type: 'number', helperText: '留空指派给自己。' },
+      { name: 'priority', label: '优先级', type: 'select', value: 'MEDIUM', required: true,
+        options: [{ value: 'LOW', label: '低' }, { value: 'MEDIUM', label: '中' }, { value: 'HIGH', label: '高' }] },
+      { name: 'dueAt', label: '处理截止时间（可选）', type: 'datetime-local', helperText: '按当前电脑的本地时间填写。' },
+      { name: 'note', label: '指派备注（可选）', type: 'textarea' },
+    ],
+  });
+  if (!result.confirmed || token !== authToken) return null;
+  const { assignee = '', priority, dueAt: dueAtRaw = '', note = '' } = result.values;
+  const assigneeAdminId = assignee ? Number(assignee) : undefined;
+  if (assignee && (!Number.isSafeInteger(assigneeAdminId) || assigneeAdminId <= 0)) {
+    showError('管理员 ID 必须为正整数。'); return null;
+  }
+  if (!['LOW', 'MEDIUM', 'HIGH'].includes(priority)) {
+    showError('请选择有效的优先级。'); return null;
+  }
+  const dueAt = dueAtRaw ? new Date(dueAtRaw) : null;
+  if (dueAt && Number.isNaN(dueAt.getTime())) {
+    showError('截止时间格式无效。'); return null;
+  }
+  return { assigneeAdminId, priority, dueAt: dueAt?.toISOString(), note };
+}
+
 async function assignReport(reportId) {
-  const assigneeRaw = (await promptText('输入要指派的管理员ID（留空=指派给自己）：', '', {
-    title: '指派举报',
-    label: '管理员ID',
-    confirmText: '继续',
-    confirmVariant: 'dark',
-  })) || '';
-  const priorityRaw = ((await promptText('输入优先级（LOW/MEDIUM/HIGH）', 'MEDIUM', {
-    title: '指派举报',
-    label: '优先级',
-    confirmText: '继续',
-    confirmVariant: 'dark',
-  })) || 'MEDIUM').toUpperCase();
-  const dueAtRaw = (await promptText('输入SLA截止时间（可选，例如 2026-05-01 18:00）：', '', {
-    title: '指派举报',
-    label: 'SLA 截止时间',
-    required: false,
-    confirmText: '继续',
-    confirmVariant: 'dark',
-  })) || '';
-  const note = (await promptText('输入指派备注（可选）：', '', {
-    title: '指派举报',
-    label: '指派备注',
-    multiline: true,
-    required: false,
-    confirmText: '继续',
-    confirmVariant: 'dark',
-  })) || '';
-
-  let dueAt;
-  if (dueAtRaw.trim()) {
-    const parsed = new Date(dueAtRaw.replace(' ', 'T'));
-    if (Number.isNaN(parsed.getTime())) {
-      showError('SLA时间格式无效');
-      return;
-    }
-    dueAt = parsed.toISOString();
-  }
-
+  const assignment = await requestAssignment('指派举报');
+  if (!assignment) return;
   try {
-    await apiRequest(`/admin/reports/${reportId}/assign`, {
-      method: 'PATCH',
-      body: JSON.stringify({
-        assigneeAdminId: assigneeRaw ? Number(assigneeRaw) : undefined,
-        priority: priorityRaw,
-        dueAt,
-        note,
-      }),
-    });
-
+    await apiRequest(`/admin/reports/${reportId}/assign`, { method: 'PATCH', body: JSON.stringify(assignment) });
+    showSuccess('举报已指派');
     await loadReports(state.currentPage.reports);
-  } catch (error) {
-    showError(`指派失败: ${error.message}`);
-  }
+  } catch (error) { showError(`指派失败: ${error.message}`); }
 }
 
 async function resolveReport(reportId, action) {
@@ -3148,7 +3253,7 @@ async function loadFeedbacks(page = 1) {
             <div class="flex justify-between items-start gap-3 mb-2">
               <div>
                 <p class="font-semibold">#${feedback.id} · ${escapeHtml(feedback.title || '-')}</p>
-                <p class="text-sm text-gray-700">${escapeHtml(feedback.type || '-')} · 用户：${escapeHtml(
+                <p class="text-sm text-gray-700">${escapeHtml(adminLabel(feedback.type))} · 用户：${escapeHtml(
           feedback.user?.nickname || maskEmail(feedback.user?.email) || `#${feedback.user?.id || '-'}`
         )}</p>
                 <p class="text-xs text-gray-500">提交时间：${formatDateTime(feedback.createdAt)} · App版本：${escapeHtml(
@@ -3164,7 +3269,7 @@ async function loadFeedbacks(page = 1) {
 
             <div class="flex flex-wrap gap-2 text-xs mb-2">
               <span class="px-2 py-1 rounded bg-gray-100 text-gray-700">截图：${feedback.hasScreenshots ? `有 (${feedback.screenshotCount})` : '无'}</span>
-              <span class="px-2 py-1 rounded bg-gray-100 text-gray-700">奖励状态：${escapeHtml(feedback.rewardStatus || 'none')}</span>
+              <span class="px-2 py-1 rounded bg-gray-100 text-gray-700">奖励状态：${escapeHtml(adminLabel(feedback.rewardStatus || 'none'))}</span>
             </div>
 
             ${latestReward}
@@ -3297,14 +3402,15 @@ async function updateFeedbackStatus(feedbackId, currentStatus, currentPriority) 
   if (priority === null) return;
   const reason = await promptReason('更新反馈状态原因', true);
   if (reason === null) return;
-  const adminNote = (await promptText('管理员备注（可选）', '', {
+  const adminNote = await promptText('管理员备注（可选）', '', {
     title: '更新反馈状态',
     label: '管理员备注',
     multiline: true,
     required: false,
     confirmText: '继续',
     confirmVariant: 'dark',
-  })) || '';
+  });
+  if (adminNote === null) return;
   if (!(await confirmCriticalAction(`更新反馈状态为 ${status.trim()}`, reason))) return;
 
   try {
@@ -3324,13 +3430,14 @@ async function updateFeedbackStatus(feedbackId, currentStatus, currentPriority) 
 }
 
 async function replyFeedback(feedbackId) {
-  const adminReply = (await promptText('请输入回复内容（会显示给用户）:', '', {
+  const adminReply = await promptText('请输入回复内容（会显示给用户）:', '', {
     title: '回复反馈',
     label: '回复内容',
     multiline: true,
     confirmText: '继续',
     confirmVariant: 'dark',
-  })) || '';
+  });
+  if (adminReply === null) return;
   if (!adminReply.trim()) {
     showError('回复内容不能为空');
     return;
@@ -3351,33 +3458,37 @@ async function replyFeedback(feedbackId) {
 }
 
 async function rewardFeedback(feedbackId) {
-  const rewardType = normalizeFeedbackRewardType((await promptText(paymentsAreEnabled() ? '奖励类型（不发放 / 置顶 / 代金券 / 会员天数 / 积分 / 余额）' : '奖励类型（不发放 / 置顶 / 代金券 / 会员天数 / 积分；余额暂未开放）', '不发放', {
+  const rewardInput = await promptText(paymentsAreEnabled() ? '奖励类型（不发放 / 置顶 / 代金券 / 会员天数 / 积分 / 余额）' : '奖励类型（不发放 / 置顶 / 代金券 / 会员天数 / 积分；余额暂未开放）', '不发放', {
     title: '发放反馈奖励',
     label: '奖励类型',
     confirmText: '继续',
     confirmVariant: 'dark',
-  })) || '不发放');
+  });
+  if (rewardInput === null) return;
+  const rewardType = normalizeFeedbackRewardType(rewardInput);
   if (!rewardType) return;
   if (rewardType === 'BALANCE' && !paymentsAreEnabled()) {
     showError(paymentsUnavailableMessage);
     return;
   }
 
-  const rewardValue = (await promptText('奖励值（例如 24h / 7 / 100 / 10.00，可选）', '', {
+  const rewardValue = await promptText('奖励值（例如 24h / 7 / 100 / 10.00，可选）', '', {
     title: '发放反馈奖励',
     label: '奖励值',
     required: false,
     confirmText: '继续',
     confirmVariant: 'dark',
-  })) || '';
-  const note = (await promptText('奖励备注（可选）', '', {
+  });
+  if (rewardValue === null) return;
+  const note = await promptText('奖励备注（可选）', '', {
     title: '发放反馈奖励',
     label: '奖励备注',
     multiline: true,
     required: false,
     confirmText: '继续',
     confirmVariant: 'dark',
-  })) || '';
+  });
+  if (note === null) return;
   const reason = await promptReason('发放反馈奖励原因', true);
   if (reason === null) return;
   if (!(await confirmCriticalAction(`发放反馈奖励：${rewardType}`, reason))) return;
@@ -3398,6 +3509,15 @@ async function rewardFeedback(feedbackId) {
   } catch (error) {
     showError(`奖励发放失败: ${error.message}`);
   }
+}
+
+function renderItemStatusActions(item) {
+  const id = Number(item.id);
+  if (!Number.isSafeInteger(id) || id <= 0) return '';
+  if (item.status === 'ACTIVE') return `<button onclick="setItemStatus(${id}, 'WITHDRAWN')" class="btn-red">下架</button>`;
+  if (item.status === 'WITHDRAWN') return `<button onclick="setItemStatus(${id}, 'ACTIVE')" class="btn-gray">恢复</button>`;
+  if (['PENDING_REVIEW', 'REJECTED'].includes(item.status)) return `<span class="text-xs text-gray-500">历史审核状态；新提交请到发布审核处理。</span>`;
+  return '<span class="text-xs text-gray-500">由交易流程管理状态</span>';
 }
 
 async function loadItems(page = 1) {
@@ -3465,7 +3585,7 @@ async function loadItems(page = 1) {
                     : item.status === 'WITHDRAWN'
                     ? 'bg-gray-100 text-gray-700'
                     : 'bg-amber-100 text-amber-700'
-                }">${item.status}</span>
+                }">${escapeHtml(adminLabel(item.status))}</span>
               </div>
               ${
                 thumb
@@ -3477,9 +3597,7 @@ async function loadItems(page = 1) {
               <p class="text-sm text-gray-700 mb-3">置顶：${item.isPinned ? '是' : '否'} · 置顶到期：${formatDateTime(item.pinnedAt)} · 举报 ${item.reportCount || 0}</p>
               <div class="flex gap-2 flex-wrap">
                 <button onclick="openItemDetail(${item.id})" class="btn-gray">详情</button>
-                <button onclick="setItemStatus(${item.id}, 'ACTIVE')" class="btn-gray">恢复</button>
-                <button onclick="setItemStatus(${item.id}, 'WITHDRAWN')" class="btn-red">下架</button>
-                <button onclick="setItemStatus(${item.id}, 'REJECTED')" class="btn-red">审核拒绝</button>
+                ${renderItemStatusActions(item)}
                 <button onclick="adjustItemPin(${item.id}, 'EXTEND_24H')" class="btn-gray">补偿置顶</button>
               </div>
             </div>
@@ -3609,11 +3727,11 @@ async function openItemDetail(itemId) {
     const reports = data.reports || [];
     const adminLogs = data.adminLogs || [];
     const orderRows = (item.orders || [])
-      .map((order) => `<li>订单 #${order.id} · ${order.status} · ${formatMoney(order.amount)}</li>`)
+      .map((order) => `<li>订单 #${order.id} · ${escapeHtml(adminLabel(order.status))} · ${formatMoney(order.amount)}</li>`)
       .join('');
 
     const reportRows = reports
-      .map((report) => `<li>#${report.id} · ${escapeHtml(report.reason || '-')} · ${report.status} · ${formatDateTime(report.createdAt)}</li>`)
+      .map((report) => `<li>#${report.id} · ${escapeHtml(report.reason || '-')} · ${escapeHtml(adminLabel(report.status))} · ${formatDateTime(report.createdAt)}</li>`)
       .join('');
 
     const logRows = adminLogs
@@ -3626,7 +3744,13 @@ async function openItemDetail(itemId) {
         <div><span class="font-semibold">商品ID：</span>${item.id}</div>
         <div><span class="font-semibold">标题：</span>${escapeHtml(item.title)}</div>
         <div><span class="font-semibold">分类：</span>${escapeHtml(item.category || '-')}</div>
-        <div><span class="font-semibold">状态：</span>${item.status}</div>
+        <div><span class="font-semibold">成色：</span>${escapeHtml(item.condition || '-')}</div>
+        <div><span class="font-semibold">交付方式：</span>${escapeHtml(adminLabel(item.fulfillmentMethod))}</div>
+        <div><span class="font-semibold">描述：</span><p class="whitespace-pre-wrap break-words">${escapeHtml(item.description || '暂无描述')}</p></div>
+        <div class="grid grid-cols-2 gap-2">${getImages(item.images).map(resolveImageUrl).filter(Boolean).map((url, index) =>
+          `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer"><img src="${escapeHtml(url)}" alt="商品图片 ${index + 1}" loading="lazy" referrerpolicy="no-referrer" class="w-full h-40 object-contain rounded border" /></a>`
+        ).join('') || '<p class="text-gray-500">暂无图片</p>'}</div>
+        <div><span class="font-semibold">状态：</span>${escapeHtml(adminLabel(item.status))}</div>
         <div><span class="font-semibold">卖家：</span>${escapeHtml(item.seller?.nickname || '-')} (${escapeHtml(maskEmail(item.seller?.email || '-'))})</div>
         <div><span class="font-semibold">城市：</span>${escapeHtml(item.pickupCity || '-')}</div>
         <div><span class="font-semibold">价格：</span>${formatMoney(item.expectedPrice)}</div>
@@ -3705,7 +3829,7 @@ async function loadOrders(page = 1) {
                     : order.status === 'CANCELED'
                     ? 'bg-gray-100 text-gray-700'
                     : 'bg-amber-100 text-amber-700'
-                }">${order.status}</span>
+                }">${escapeHtml(adminLabel(order.status))}</span>
               </div>
               <p class="text-sm text-gray-700">商品：${escapeHtml(order.item?.title || '-')}</p>
               <p class="text-sm text-gray-700">买家：${escapeHtml(order.buyer?.nickname || '-')}（${escapeHtml(maskEmail(order.buyer?.email || '-'))}）</p>
@@ -3730,13 +3854,28 @@ async function loadOrders(page = 1) {
   }
 }
 
+function renderOrderProgress(order) {
+  const isSelfPickup = order.fulfillmentMethod === 'SELF_PICKUP' && order.fundingSource === 'OFFLINE_C2C';
+  const canonical = order.recordState === 'CANONICAL';
+  const rows = [`创建订单：${formatDateTime(order.createdAt)}`];
+  if (order.paidAt) rows.push(`${isSelfPickup && canonical ? '买家声明已线下付款' : '付款登记'}：${formatDateTime(order.paidAt)}`);
+  rows.push(`最近更新：${formatDateTime(order.updatedAt)} · ${adminLabel(order.status)}`);
+  const note = isSelfPickup
+    ? canonical ? '线下付款由买家声明，平台未收取或核验款项。' : '历史记录不能据此核定验货或线下付款。'
+    : '';
+  return `<div class="rounded border p-3 my-3"><p class="font-semibold">处理进度</p>
+    <ul class="list-disc pl-5">${rows.map(row => `<li>${escapeHtml(row)}</li>`).join('')}</ul>
+    ${isSelfPickup && !order.paidAt ? '<p class="mt-2">尚无买家线下付款声明记录。</p>' : ''}
+    ${note ? `<p class="text-sm text-gray-600 mt-2">${note}</p>` : ''}</div>`;
+}
+
 async function openOrderDetail(orderId) {
   try {
     const data = await apiRequest(`/admin/orders/${orderId}`);
     const order = data.order;
 
     const transactions = (order.transactions || [])
-      .map((tx) => `<li>#${tx.id} · ${tx.type} · ${formatMoney(tx.amount)} · ${formatDateTime(tx.createdAt)}</li>`)
+      .map((tx) => `<li>#${tx.id} · ${escapeHtml(adminLabel(tx.type))} · ${formatMoney(tx.amount)} · ${formatDateTime(tx.createdAt)}</li>`)
       .join('');
 
     const movingServices = (order.movingServices || [])
@@ -3746,9 +3885,14 @@ async function openOrderDetail(orderId) {
     const html = `
       <div class="space-y-2">
         <div><span class="font-semibold">订单ID：</span>${order.id}</div>
-        <div><span class="font-semibold">状态：</span>${order.status}</div>
+        <div><span class="font-semibold">状态：</span>${escapeHtml(adminLabel(order.status))}</div>
         <div><span class="font-semibold">金额：</span>${formatMoney(order.amount)}</div>
-        <div><span class="font-semibold">支付方式：</span>${escapeHtml(order.payMethod || '-')}</div>
+        <div><span class="font-semibold">交付方式：</span>${escapeHtml(adminLabel(order.fulfillmentMethod))}</div>
+        <div><span class="font-semibold">资金来源：</span>${escapeHtml(adminLabel(order.fundingSource))}</div>
+        <div><span class="font-semibold">支付方式：</span>${escapeHtml(adminLabel(order.payMethod))}</div>
+        <div><span class="font-semibold">约定取货时间：</span>${formatDateTime(order.pickupDate)}</div>
+        <div><span class="font-semibold">约定取货地点：</span>${escapeHtml(order.pickupAddress || '未填写')}</div>
+        ${renderOrderProgress(order)}
         <div><span class="font-semibold">买家：</span>${escapeHtml(order.buyer?.nickname || '-')} (${escapeHtml(maskEmail(order.buyer?.email || '-'))})</div>
         <div><span class="font-semibold">卖家：</span>${escapeHtml(order.seller?.nickname || '-')} (${escapeHtml(maskEmail(order.seller?.email || '-'))})</div>
         <div><span class="font-semibold">商品：</span>${escapeHtml(order.item?.title || '-')}</div>
@@ -3788,6 +3932,12 @@ async function openOrderDispute(orderId) {
   }
 }
 
+function renderLedgerDescription(value) {
+  const description = String(value || '-');
+  if (description.length <= 100) return `<div class="ledger-description">${escapeHtml(description)}</div>`;
+  return `<details><summary class="cursor-pointer">${escapeHtml(description.slice(0, 100))}… <span class="underline">展开</span></summary><div class="ledger-description mt-2">${escapeHtml(description)}</div></details>`;
+}
+
 async function loadTransactions(page = 1) {
   state.currentPage.transactions = page;
 
@@ -3823,14 +3973,14 @@ async function loadTransactions(page = 1) {
           (tx) => `
             <tr>
               <td class="td">${escapeHtml(tx.ledgerId || String(tx.id || '-'))}</td>
-              <td class="td">${escapeHtml(tx.source || '-')}<br /><span class="text-xs text-gray-500">${escapeHtml(
+              <td class="td">${escapeHtml(adminLabel(tx.source))}<br /><span class="text-xs text-gray-500">${escapeHtml(
             formatPaymentChannelLabel(tx.paymentChannel)
           )}</span></td>
-              <td class="td">${tx.type}</td>
+              <td class="td">${escapeHtml(adminLabel(tx.type))}</td>
               <td class="td">${formatMoney(tx.amount)}</td>
               <td class="td">${escapeHtml(tx.user?.nickname || '-')}<br /><span class="text-xs text-gray-500">${escapeHtml(maskEmail(tx.user?.email || '-'))}</span></td>
               <td class="td">${tx.order ? `#${tx.order.id} (${tx.order.status})` : '-'}</td>
-              <td class="td">${escapeHtml(tx.description || '-')}</td>
+              <td class="td">${renderLedgerDescription(tx.description)}</td>
               <td class="td">${formatDateTime(tx.createdAt)}</td>
             </tr>
           `
@@ -3867,7 +4017,7 @@ async function loadDisputes(page = 1) {
           <div class="card">
             <div class="flex justify-between items-start gap-3 mb-2">
               <div>
-                <p class="font-semibold">举报 #${report.id} · ${report.targetType}#${report.targetId}</p>
+                <p class="font-semibold">举报 #${report.id} · ${escapeHtml(adminLabel(report.targetType))}#${report.targetId}</p>
                 <p class="text-sm text-gray-700">${escapeHtml(report.reason || '-')}</p>
                 <p class="text-sm text-gray-700">${escapeHtml(report.description || '-')}</p>
                 <p class="text-xs text-gray-500">${formatDateTime(report.createdAt)}</p>
@@ -3875,7 +4025,7 @@ async function loadDisputes(page = 1) {
               <div class="text-right">
                 <span class="px-2 py-1 rounded text-xs ${
                   report.status === 'PENDING' ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-700'
-                }">${report.status}</span>
+                }">${escapeHtml(adminLabel(report.status))}</span>
                 <div class="mt-1">${renderSlaBadge(report.slaStatus)}</div>
               </div>
             </div>
@@ -3908,7 +4058,7 @@ async function loadDisputes(page = 1) {
           <div class="card">
             <div class="flex justify-between items-start gap-3 mb-2">
               <div>
-                <p class="font-semibold">订单 #${order.id} · ${order.status}</p>
+                <p class="font-semibold">订单 #${order.id} · ${escapeHtml(adminLabel(order.status))}</p>
                 <p class="text-sm text-gray-700">商品：${escapeHtml(order.item?.title || '-')}</p>
                 <p class="text-sm text-gray-700">买家：${escapeHtml(order.buyer?.nickname || '-')} · 卖家：${escapeHtml(
             order.seller?.nickname || '-'
@@ -3980,59 +4130,13 @@ function renderDisputeOrderActions(order) {
 }
 
 async function assignDisputeOrder(orderId) {
-  const assigneeRaw = (await promptText('输入要指派的管理员ID（留空=自己）：', '', {
-    title: '指派纠纷订单',
-    label: '管理员ID',
-    confirmText: '继续',
-    confirmVariant: 'dark',
-  })) || '';
-  const priorityRaw = ((await promptText('输入优先级（LOW/MEDIUM/HIGH）', 'MEDIUM', {
-    title: '指派纠纷订单',
-    label: '优先级',
-    confirmText: '继续',
-    confirmVariant: 'dark',
-  })) || 'MEDIUM').toUpperCase();
-  const dueAtRaw = (await promptText('输入SLA截止时间（可选，例如 2026-05-01 18:00）：', '', {
-    title: '指派纠纷订单',
-    label: 'SLA 截止时间',
-    required: false,
-    confirmText: '继续',
-    confirmVariant: 'dark',
-  })) || '';
-  const note = (await promptText('输入备注（可选）：', '', {
-    title: '指派纠纷订单',
-    label: '备注',
-    multiline: true,
-    required: false,
-    confirmText: '继续',
-    confirmVariant: 'dark',
-  })) || '';
-
-  let dueAt;
-  if (dueAtRaw.trim()) {
-    const parsed = new Date(dueAtRaw.replace(' ', 'T'));
-    if (Number.isNaN(parsed.getTime())) {
-      showError('SLA时间格式无效');
-      return;
-    }
-    dueAt = parsed.toISOString();
-  }
-
+  const assignment = await requestAssignment('指派纠纷订单');
+  if (!assignment) return;
   try {
-    await apiRequest(`/admin/disputes/orders/${orderId}/assign`, {
-      method: 'PATCH',
-      body: JSON.stringify({
-        assigneeAdminId: assigneeRaw ? Number(assigneeRaw) : undefined,
-        priority: priorityRaw,
-        dueAt,
-        note,
-      }),
-    });
-
+    await apiRequest(`/admin/disputes/orders/${orderId}/assign`, { method: 'PATCH', body: JSON.stringify(assignment) });
+    showSuccess('纠纷订单已指派');
     await loadDisputes(state.currentPage.disputes);
-  } catch (error) {
-    showError(`指派失败: ${error.message}`);
-  }
+  } catch (error) { showError(`指派失败: ${error.message}`); }
 }
 
 async function resolveDisputeOrder(orderId, action) {
@@ -4792,7 +4896,7 @@ async function loadStorageOrders(page = 1) {
                     : order.status === 'COMPLETED'
                     ? 'bg-blue-100 text-blue-700'
                     : 'bg-amber-100 text-amber-700'
-                }">${order.status}</span>
+                }">${escapeHtml(adminLabel(order.status))}</span>
               </div>
               <div class="flex gap-2 flex-wrap">
                 ${renderStorageActionButtons(order)}
@@ -4847,7 +4951,7 @@ async function loadRecycleConsign() {
         (item) => `
           <div class="card">
             <p class="font-semibold">#${item.id} · ${escapeHtml(item.title)}</p>
-            <p class="text-sm text-gray-700">卖家：${escapeHtml(item.seller?.nickname || '-')} · 状态：${item.status}</p>
+            <p class="text-sm text-gray-700">卖家：${escapeHtml(item.seller?.nickname || '-')} · 状态：${escapeHtml(adminLabel(item.status))}</p>
             <div class="flex gap-2 mt-2">
               <button onclick="updateRecycleConsignItem(${item.id}, 'MARK_RECYCLED')" class="btn-gray">标记回收</button>
               <button onclick="updateRecycleConsignItem(${item.id}, 'MARK_CONSIGNED')" class="btn-red">标记寄卖</button>
@@ -4878,7 +4982,7 @@ async function loadRecycleConsign() {
           <div class="card">
             <p class="font-semibold">#${item.id} · ${escapeHtml(item.title)}</p>
             <p class="text-sm text-gray-700">来源仓储单：${item.sourceStorageOrderId || '-'}</p>
-            <p class="text-sm text-gray-700">状态：${item.status}</p>
+            <p class="text-sm text-gray-700">状态：${escapeHtml(adminLabel(item.status))}</p>
           </div>
         `
       )
@@ -5112,12 +5216,14 @@ async function openGrantMembershipPrompt() {
     confirmVariant: 'dark',
   })) || 0);
   if (!userId) return;
-  const mode = paymentsAreEnabled() ? normalizeMembershipGrantMode((await promptText('发放方式（立即发放 / 待处理）', '立即发放', {
-    title: '赠送会员（不收款）',
-    label: '发放方式',
-    confirmText: '继续',
-    confirmVariant: 'dark',
-  })) || '立即发放') : 'CONFIRM';
+  let mode = 'CONFIRM';
+  if (paymentsAreEnabled()) {
+    const modeInput = await promptText('发放方式（立即发放 / 待处理）', '立即发放', {
+      title: '赠送会员（不收款）', label: '发放方式', confirmText: '继续', confirmVariant: 'dark',
+    });
+    if (modeInput === null) return;
+    mode = normalizeMembershipGrantMode(modeInput);
+  }
   const reason = await promptReason('赠送会员原因（不收款）', true);
   if (reason === null) return;
 
@@ -5178,24 +5284,27 @@ async function openGrantRewardPrompt() {
     confirmVariant: 'dark',
   })) || 0);
   if (!userId) return;
-  const rewardType = normalizeRewardType((await promptText(paymentsAreEnabled() ? '奖励类型（置顶 / 会员30天 / 积分 / 余额）' : '奖励类型（置顶 / 会员30天 / 积分；余额暂未开放）', '置顶', {
+  const rewardInput = await promptText(paymentsAreEnabled() ? '奖励类型（置顶 / 会员30天 / 积分 / 余额）' : '奖励类型（置顶 / 会员30天 / 积分；余额暂未开放）', '置顶', {
     title: '发放奖励',
     label: '奖励类型',
     confirmText: '继续',
     confirmVariant: 'dark',
-  })) || '置顶');
+  });
+  if (rewardInput === null) return;
+  const rewardType = normalizeRewardType(rewardInput);
   if (!rewardType) return;
   if (rewardType === 'BALANCE' && !paymentsAreEnabled()) {
     showError(paymentsUnavailableMessage);
     return;
   }
-  const rewardValue = (await promptText('奖励值（例如 24h / 100 / 10.00）', '', {
+  const rewardValue = await promptText('奖励值（例如 24h / 100 / 10.00）', '', {
     title: '发放奖励',
     label: '奖励值',
     required: false,
     confirmText: '继续',
     confirmVariant: 'dark',
-  })) || '';
+  });
+  if (rewardValue === null) return;
   const reason = await promptReason('奖励发放原因', true);
   if (reason === null) return;
 
@@ -5527,9 +5636,14 @@ async function loadWithdrawals(page = 1) {
   }
 }
 
+let featureFlagsLoadGeneration = 0;
 async function loadFeatureFlags() {
+  const generation = ++featureFlagsLoadGeneration, token = authToken;
+  state.featureFlags.loaded = false;
+  setText('listingReviewFlagStatus', '正在读取审核状态…');
   try {
-    const data = await apiRequest('/admin/feature-flags');
+    const [data, review] = await Promise.all([apiRequest('/admin/feature-flags'), readCurrentReviewSummary()]);
+    if (token !== authToken || generation !== featureFlagsLoadGeneration) return;
     const flags = data.flags || {};
     state.featureFlags.paymentsEnabled = flags.paymentsEnabled === true;
     const setCheckbox = (id, value) => {
@@ -5546,7 +5660,12 @@ async function loadFeatureFlags() {
     setCheckbox('flagMembershipPurchaseEnabled', paymentsAreEnabled() && flags.membershipPurchaseEnabled === true);
     setCheckbox('flagFeedbackRewardEnabled', flags.feedbackRewardEnabled);
     setCheckbox('flagOfflineServiceEnabled', flags.offlineServiceEnabled);
-    setCheckbox('flagItemReviewEnabled', flags.itemReviewEnabled);
+    state.featureFlags.legacyItemReviewEnabled = flags.itemReviewEnabled === true;
+    state.featureFlags.loaded = true;
+    setCheckbox('flagItemReviewEnabled', review.enabled === true);
+    const reviewCheckbox = document.getElementById('flagItemReviewEnabled');
+    if (reviewCheckbox) { reviewCheckbox.disabled = true; reviewCheckbox.indeterminate = review.enabled === null; }
+    setText('listingReviewFlagStatus', review.enabled === true ? '发布审核已启用。状态由发布配置管理，此处只读。' : review.enabled === false ? '发布审核未启用。状态由发布配置管理，此处只读。' : '审核状态读取失败，当前状态未知，请刷新。');
     setCheckbox('flagReportEnabled', flags.reportEnabled);
     setCheckbox('flagTradeFlowCardEnabled', flags.tradeFlowCardEnabled);
     setValue('flagPin24hPrice', flags.pinPricing?.pin24h ?? 1.99);
@@ -5559,6 +5678,11 @@ async function loadFeatureFlags() {
     renderPlatformDeliveryNoticeBanners();
     renderPaymentsNoticeBanners();
   } catch (error) {
+    if (token !== authToken || generation !== featureFlagsLoadGeneration) return;
+    state.featureFlags.loaded = false;
+    setText('listingReviewFlagStatus', '配置读取失败，请刷新后再操作。');
+    const reviewCheckbox = document.getElementById('flagItemReviewEnabled');
+    if (reviewCheckbox) { reviewCheckbox.checked = false; reviewCheckbox.indeterminate = true; }
     state.featureFlags.paymentsEnabled = false;
     state.featureFlags.platformDeliveryEnabled = false;
     for (const id of ['flagPaidPinEnabled', 'flagMembershipPurchaseEnabled']) {
@@ -5572,6 +5696,7 @@ async function loadFeatureFlags() {
 }
 
 async function saveFeatureFlags() {
+  if (!state.featureFlags.loaded) { showError('请先成功读取系统配置，再保存。'); return; }
   const reason = await promptReason('保存功能开关', true);
   if (reason === null) return;
   const getCheckbox = (id) => Boolean(document.getElementById(id)?.checked);
@@ -5584,7 +5709,7 @@ async function saveFeatureFlags() {
     batchPublishEnabled: getCheckbox('flagBatchPublishEnabled'),
     feedbackRewardEnabled: getCheckbox('flagFeedbackRewardEnabled'),
     offlineServiceEnabled: getCheckbox('flagOfflineServiceEnabled'),
-    itemReviewEnabled: getCheckbox('flagItemReviewEnabled'),
+    itemReviewEnabled: state.featureFlags.legacyItemReviewEnabled,
     reportEnabled: getCheckbox('flagReportEnabled'),
     tradeFlowCardEnabled: getCheckbox('flagTradeFlowCardEnabled'),
     pinPricing: {
