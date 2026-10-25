@@ -1855,6 +1855,7 @@ async function confirmCriticalAction(actionLabel, reason) {
 }
 
 function openDetailDrawer(title, html) {
+  clearOrderHistoryView();
   clearPrivateProofPreview();
   setText('detailDrawerTitle', title);
   setHtml('detailDrawerBody', html);
@@ -1863,6 +1864,7 @@ function openDetailDrawer(title, html) {
 }
 
 function closeDetailDrawer() {
+  clearOrderHistoryView();
   clearPrivateProofPreview();
   document.getElementById('detailDrawerMask')?.classList.add('hidden');
   document.getElementById('detailDrawer')?.classList.add('hidden');
@@ -2028,6 +2030,7 @@ function getAdminRootUrl() {
 }
 
 function clearAdminSession() {
+  clearOrderHistoryView();
   adminResponseGeneration++;
   state.featureFlags.loaded = false;
   clearPrivateProofPreview();
@@ -3855,6 +3858,115 @@ async function loadOrders(page = 1) {
   }
 }
 
+const orderHistoryView = { generation: 0, orderId: null, token: null, controller: null,
+  previewController: null, previewGeneration: 0, previewUrl: null, cursor: null, busy: false, count: 0, evidence: new Map() };
+function closeOrderEvidence() {
+  orderHistoryView.previewGeneration++;
+  orderHistoryView.previewController?.abort(); orderHistoryView.previewController = null;
+  if (orderHistoryView.previewUrl) URL.revokeObjectURL(orderHistoryView.previewUrl);
+  orderHistoryView.previewUrl = null;
+  document.getElementById('orderEvidenceImage')?.removeAttribute('src');
+  document.getElementById('orderEvidencePreview')?.classList.add('hidden');
+  setText('orderEvidenceStatus', '');
+}
+function clearOrderHistoryView() {
+  orderHistoryView.generation++;
+  orderHistoryView.controller?.abort(); orderHistoryView.controller = null;
+  closeOrderEvidence();
+  orderHistoryView.orderId = null; orderHistoryView.token = null; orderHistoryView.cursor = null;
+  orderHistoryView.busy = false; orderHistoryView.count = 0; orderHistoryView.evidence.clear();
+  for (const id of ['orderHistoryList','orderHistoryStatus','orderHistoryNotice','orderDeliveryEvidence']) setHtml(id,'');
+}
+function orderHistoryCurrent(generation, token, orderId) {
+  return generation === orderHistoryView.generation && token === authToken && !!token
+    && token === orderHistoryView.token && orderId === orderHistoryView.orderId;
+}
+function orderEvidencePath(path, orderId) {
+  return typeof path === 'string' && new RegExp(`^/admin/orders/${orderId}/evidence/(message|service)/[1-9][0-9]*/[0-7]$`).test(path);
+}
+function validateOrderHistory(data, orderId) {
+  const str = (s, max = 4000) => typeof s === 'string' && s.length <= max;
+  const proof = e => e && Number.isInteger(e.index) && e.index >= 0 && e.index < 8 && str(e.label,100)
+    && typeof e.available === 'boolean' && (e.available ? orderEvidencePath(e.path,orderId) : e.path === null && str(e.reason,300));
+  if (!data || data.orderId !== orderId || !Array.isArray(data.events) || data.events.length > 50
+    || !Array.isArray(data.notices) || data.notices.some(s=>!str(s,500))
+    || (data.nextCursor !== null && (!str(data.nextCursor,512) || !/^[A-Za-z0-9_-]+$/.test(data.nextCursor)))
+    || !Array.isArray(data.deliveryEvidence) || data.deliveryEvidence.some(s=>!Number.isSafeInteger(s.serviceId)||s.serviceId<=0||!Array.isArray(s.evidence)||s.evidence.length>8||s.evidence.some(e=>!proof(e)))
+    || data.events.some(e=>!e || !str(e.key,100) || !/^(message|offer|admin|case|delivery):[a-z0-9-]+$/.test(e.key)
+      || !str(e.title,100) || !str(e.actor,50) || !Number.isFinite(Date.parse(e.occurredAt))
+      || !Array.isArray(e.fields) || e.fields.length>20 || e.fields.some(f=>!str(f.label,100)||!str(f.value))
+      || !Array.isArray(e.evidence) || e.evidence.length>8 || e.evidence.some(p=>!proof(p)))) throw new Error('订单记录响应无效，请刷新。');
+  return data;
+}
+function renderOrderEvidenceLinks(proofs, key) {
+  return proofs.map(proof => {
+    const handle = `${key}-${proof.index}`;
+    if (!proof.available) return `<p class="text-xs text-amber-800">${escapeHtml(proof.label)}：${escapeHtml(proof.reason)}</p>`;
+    orderHistoryView.evidence.set(handle, proof.path);
+    return `<button type="button" class="btn-gray" onclick="openOrderEvidence('${handle}')">查看${escapeHtml(proof.label)}</button>`;
+  }).join('');
+}
+function renderOrderHistoryEvent(event) {
+  const actors = { BUYER:'买家', SELLER:'卖家', ADMIN:'管理员', SYSTEM:'系统', USER:'用户', DRIVER:'配送人员', UNKNOWN:'未记录' };
+  return `<article class="border-l-2 border-slate-300 pl-3 py-2">
+    <p class="font-semibold">${escapeHtml(event.title)}</p>
+    <p class="text-xs text-gray-500">${escapeHtml(formatDateTime(event.occurredAt))} · ${escapeHtml(actors[event.actor] || '其他记录')}</p>
+    ${event.fields.map(f=>`<p class="mt-1 whitespace-pre-wrap break-words"><span class="font-medium">${escapeHtml(f.label)}：</span>${escapeHtml(['当前状态','此前状态','处理后状态','优先级'].includes(f.label)?adminLabel(f.value):f.value)}</p>`).join('')}
+    <div class="flex flex-wrap gap-2 mt-2">${renderOrderEvidenceLinks(event.evidence,event.key)}</div></article>`;
+}
+async function loadOrderHistory(next = false) {
+  const { generation, token, orderId } = orderHistoryView;
+  if (!orderHistoryCurrent(generation,token,orderId) || orderHistoryView.busy || (next && !orderHistoryView.cursor)) return;
+  orderHistoryView.busy = true;
+  if (!next) { closeOrderEvidence(); orderHistoryView.evidence.clear(); orderHistoryView.cursor=null; orderHistoryView.count=0;
+    setHtml('orderHistoryList',''); setHtml('orderDeliveryEvidence',''); }
+  const more = document.getElementById('orderHistoryMore'), refresh = document.getElementById('orderHistoryRefresh');
+  if(more)more.disabled=true;if(refresh)refresh.disabled=true;
+  setText('orderHistoryStatus','正在读取关联事件…');
+  const controller = new AbortController(); orderHistoryView.controller=controller;
+  const timer=setTimeout(()=>controller.abort(),20000);
+  try {
+    const suffix=next?`?cursor=${encodeURIComponent(orderHistoryView.cursor)}`:'';
+    const response=await fetch(`${API_BASE_URL}/admin/orders/${orderId}/history${suffix}`,{headers:{Authorization:`Bearer ${token}`},cache:'no-store',credentials:'omit',redirect:'error',signal:controller.signal});
+    if(!response.ok)throw new Error(response.status===401||response.status===403?'登录或权限已变化，请重新登录。':'事件暂时无法读取，请刷新重试。');
+    const data=validateOrderHistory(await response.json(),orderId);
+    if(controller.signal.aborted||!orderHistoryCurrent(generation,token,orderId))return;
+    const list=document.getElementById('orderHistoryList'); if(!list)return;
+    list.innerHTML+=(data.events.map(renderOrderHistoryEvent).join(''));
+    orderHistoryView.count+=data.events.length; orderHistoryView.cursor=data.nextCursor;
+    if(!next){setText('orderHistoryNotice',data.notices.join(' '));setHtml('orderDeliveryEvidence',data.deliveryEvidence.filter(s=>s.evidence.length).map(s=>
+      `<div class="border rounded p-2"><p>关联配送验货资料</p>${renderOrderEvidenceLinks(s.evidence,`service:${s.serviceId}`)}</div>`).join(''));}
+    setText('orderHistoryStatus',data.nextCursor?`已加载 ${orderHistoryView.count} 条，请继续加载后续事件。`:orderHistoryView.count?`已显示全部 ${orderHistoryView.count} 条已保存关联事件。`:'没有已保存的关联事件；不推断缺失历史。');
+    more?.classList[data.nextCursor?'remove':'add']('hidden');
+  } catch(error) { if(orderHistoryCurrent(generation,token,orderId))setText('orderHistoryStatus',error.message || '读取未完成，请刷新。'); }
+  finally {clearTimeout(timer);if(orderHistoryCurrent(generation,token,orderId)){orderHistoryView.busy=false;orderHistoryView.controller=null;if(more)more.disabled=false;if(refresh)refresh.disabled=false;}}
+}
+async function openOrderEvidence(handle) {
+  const {generation,token,orderId}=orderHistoryView, path=orderHistoryView.evidence.get(handle);
+  if(!orderHistoryCurrent(generation,token,orderId)||!orderEvidencePath(path,orderId))return;
+  closeOrderEvidence();const preview=orderHistoryView.previewGeneration;
+  document.getElementById('orderEvidencePreview')?.classList.remove('hidden');
+  setText('orderEvidenceStatus','正在核对访问权限并读取图片…');
+  const controller=new AbortController();orderHistoryView.previewController=controller;
+  const timer=setTimeout(()=>controller.abort(),20000);
+  const current=()=>orderHistoryCurrent(generation,token,orderId)&&preview===orderHistoryView.previewGeneration&&!controller.signal.aborted;
+  try {
+    const response=await fetch(API_BASE_URL+path,{headers:{Authorization:`Bearer ${token}`},cache:'no-store',credentials:'omit',redirect:'error',referrerPolicy:'no-referrer',signal:controller.signal});
+    const type=response.headers.get('content-type')?.split(';')[0],max=12*1024*1024;
+    if(response.status!==200||!['image/jpeg','image/png','image/webp','image/gif'].includes(type)||Number(response.headers.get('content-length'))>max)throw new Error();
+    let blob;
+    if(response.body?.getReader){const reader=response.body.getReader(),chunks=[];let bytes=0;
+      try{while(true){const chunk=await reader.read();if(chunk.done)break;bytes+=chunk.value.byteLength;if(!current()||bytes>max)throw new Error();chunks.push(chunk.value);}blob=new Blob(chunks,{type});}
+      finally{await reader.cancel().catch(()=>{});reader.releaseLock();}}
+    else blob=await response.blob();
+    if(!blob.size||blob.size>max)throw new Error();if(!current())return;
+    const url=URL.createObjectURL(blob);orderHistoryView.previewUrl=url;
+    document.getElementById('orderEvidenceImage')?.setAttribute('src',url);setText('orderEvidenceStatus','');
+  } catch {if(orderHistoryCurrent(generation,token,orderId)&&preview===orderHistoryView.previewGeneration)setText('orderEvidenceStatus','图片无法读取。可能已清理、归属无法核验、登录权限变化或暂时断网；可重新点击查看。');}
+  finally{clearTimeout(timer);}
+}
+document.addEventListener('visibilitychange',()=>{if(document.hidden)closeOrderEvidence();});
+
 function renderOrderProgress(order) {
   const isSelfPickup = order.fulfillmentMethod === 'SELF_PICKUP' && order.fundingSource === 'OFFLINE_C2C';
   const canonical = order.recordState === 'CANONICAL';
@@ -3871,9 +3983,14 @@ function renderOrderProgress(order) {
 }
 
 async function openOrderDetail(orderId) {
+  if (!Number.isSafeInteger(orderId) || orderId <= 0) return;
+  openDetailDrawer(`订单详情 #${orderId}`, '<p role="status">正在读取订单…</p>');
+  const generation = orderHistoryView.generation, token = authToken;
   try {
     const data = await apiRequest(`/admin/orders/${orderId}`);
+    if (generation !== orderHistoryView.generation || token !== authToken) return;
     const order = data.order;
+    if (order?.id !== orderId) throw new Error('订单响应不匹配');
 
     const transactions = (order.transactions || [])
       .map((tx) => `<li>#${tx.id} · ${escapeHtml(adminLabel(tx.type))} · ${formatMoney(tx.amount)} · ${formatDateTime(tx.createdAt)}</li>`)
@@ -3894,6 +4011,21 @@ async function openOrderDetail(orderId) {
         <div><span class="font-semibold">约定取货时间：</span>${formatDateTime(order.pickupDate)}</div>
         <div><span class="font-semibold">约定取货地点：</span>${escapeHtml(order.pickupAddress || '未填写')}</div>
         ${renderOrderProgress(order)}
+        <section class="border rounded p-3 my-4" aria-label="订单事件与验货证据">
+          <div class="flex justify-between items-center gap-2"><h4 class="font-semibold">完整事件时间线</h4>
+            <button type="button" class="btn-gray" id="orderHistoryRefresh" onclick="loadOrderHistory(false)">刷新记录</button></div>
+          <p id="orderHistoryNotice" class="text-xs text-gray-600 mt-2"></p>
+          <p id="orderHistoryStatus" class="text-sm my-2" role="status" aria-live="polite"></p>
+          <div id="orderDeliveryEvidence" class="my-3"></div>
+          <div id="orderHistoryList" class="space-y-3"></div>
+          <button type="button" id="orderHistoryMore" class="btn-gray hidden mt-3" onclick="loadOrderHistory(true)">加载后续事件</button>
+          <div id="orderEvidencePreview" class="hidden mt-4 border rounded p-3">
+            <button type="button" class="btn-gray mb-2" onclick="closeOrderEvidence()">关闭图片</button>
+            <p id="orderEvidenceStatus" role="status" class="text-sm"></p>
+            <img id="orderEvidenceImage" alt="订单验货证据" class="max-w-full rounded" />
+            <p class="text-xs text-gray-600 mt-2">图片是交易相关方提交的材料，不代表平台已核实商品质量或付款。</p>
+          </div>
+        </section>
         <div><span class="font-semibold">买家：</span>${escapeHtml(order.buyer?.nickname || '-')} (${escapeHtml(maskEmail(order.buyer?.email || '-'))})</div>
         <div><span class="font-semibold">卖家：</span>${escapeHtml(order.seller?.nickname || '-')} (${escapeHtml(maskEmail(order.seller?.email || '-'))})</div>
         <div><span class="font-semibold">商品：</span>${escapeHtml(order.item?.title || '-')}</div>
@@ -3910,8 +4042,14 @@ async function openOrderDetail(orderId) {
       </div>
     `;
 
-    openDetailDrawer(`订单详情 #${order.id}`, html);
+    setText('detailDrawerTitle', `订单详情 #${order.id}`);
+    setHtml('detailDrawerBody', html);
+    orderHistoryView.orderId = orderId;
+    orderHistoryView.token = token;
+    await loadOrderHistory(false);
   } catch (error) {
+    if (generation !== orderHistoryView.generation || token !== authToken) return;
+    setHtml('detailDrawerBody', '<p>订单详情暂时无法读取，请关闭后重新打开。</p>');
     showError(`加载订单详情失败: ${error.message}`);
   }
 }
