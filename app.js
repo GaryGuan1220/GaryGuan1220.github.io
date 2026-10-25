@@ -3650,7 +3650,8 @@ async function batchUpdateItemsStatus(status) {
     reason = (await promptReason('批量下架商品', true)) || '';
     if (!reason) return;
   } else {
-    reason = (await promptReason(`批量改状态为 ${status}（可选备注）`, false)) ?? '';
+    reason = await promptReason(`批量改状态为 ${status}（可选备注）`, false);
+    if (reason === null) return;
   }
 
   if (!(await confirmCriticalAction(`批量更新商品状态为 ${status}（${itemIds.length}条）`, reason))) return;
