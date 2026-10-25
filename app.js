@@ -1996,6 +1996,33 @@ function updateSelectionCount() {
   setText('itemSelectedCount', state.selectedItemIds.size);
   setText('movingSelectedCount', state.selectedMovingIds.size);
   setText('storageSelectedCount', state.selectedStorageIds.size);
+  for (const [id, selector] of [['selectAllItems', '.item-checkbox'], ['selectAllReports', '.report-checkbox']]) {
+    const header = document.getElementById(id);
+    if (!header) continue;
+    const rows = [...document.querySelectorAll(selector)], checked = rows.filter(row => row.checked).length;
+    header.checked = rows.length > 0 && checked === rows.length;
+    header.indeterminate = checked > 0 && checked < rows.length;
+  }
+}
+
+function applyAdminBatchResult(result, requestedIds, failedKey, selection) {
+  const requested = new Set(requestedIds), seen = new Set();
+  if (!Array.isArray(result?.successIds) || !Array.isArray(result?.failed)) throw new Error('批量结果未确认，请刷新列表核查后再处理。');
+  for (const id of result.successIds) {
+    if (!requested.has(id) || seen.has(id)) throw new Error('批量结果与所选记录不匹配，请刷新核查。');
+    seen.add(id);
+  }
+  for (const row of result.failed) {
+    const id = row?.[failedKey];
+    if (!requested.has(id) || seen.has(id) || typeof row.reason !== 'string') throw new Error('批量结果与所选记录不匹配，请刷新核查。');
+    seen.add(id);
+  }
+  if (seen.size !== requested.size) throw new Error('批量结果不完整，请刷新列表核查，暂勿重复提交。');
+  selection.clear();
+  result.failed.forEach(row => selection.add(row[failedKey]));
+  const summary = `成功 ${result.successIds.length} 条，失败 ${result.failed.length} 条。`;
+  if (result.failed.length) showError(`${summary}已保留失败项选择：${result.failed.map(row => `#${row[failedKey]} ${row.reason}`).join('；')}`);
+  else showSuccess(`批量处理完成：${summary}`);
 }
 
 function clearSelections() {
@@ -2822,7 +2849,8 @@ async function changeUserRole(userId, currentRole) {
 }
 
 async function changeUserPublishPermission(userId, currentStatus) {
-  const input = (await promptText('输入发布权限状态（ACTIVE/PAUSED）', currentStatus || 'ACTIVE', {
+  const displayStatus = currentStatus === 'ALLOWED' ? 'ACTIVE' : (currentStatus || 'ACTIVE');
+  const input = (await promptText('输入发布权限状态（ACTIVE/PAUSED）', displayStatus, {
     title: '修改发布权限',
     label: '发布权限状态',
     confirmText: '继续',
@@ -3275,8 +3303,7 @@ async function batchResolveReports(action) {
       body: JSON.stringify({ reportIds: ids, action, reason }),
     });
 
-    showSuccess(`批量处理完成：成功 ${result.successIds?.length || 0} 条，失败 ${result.failed?.length || 0} 条`);
-    state.selectedReportIds.clear();
+    applyAdminBatchResult(result, ids, 'reportId', state.selectedReportIds);
     await loadReports(state.currentPage.reports);
   } catch (error) {
     showError(`批量处理失败: ${error.message}`);
@@ -3732,12 +3759,12 @@ async function batchUpdateItemsStatus(status) {
   if (!(await confirmCriticalAction(`批量更新商品状态为 ${status}（${itemIds.length}条）`, reason))) return;
 
   try {
-    await apiRequest('/admin/items/batch-status', {
+    const result = await apiRequest('/admin/items/batch-status', {
       method: 'PATCH',
       body: JSON.stringify({ itemIds, status, reason }),
     });
 
-    state.selectedItemIds.clear();
+    applyAdminBatchResult(result, itemIds, 'itemId', state.selectedItemIds);
     await loadItems(state.currentPage.items);
   } catch (error) {
     showError(`批量更新失败: ${error.message}`);
