@@ -62,7 +62,7 @@ function clearListingReview() {
   listingReviewState.controllers.clear(); listingReviewState.urls.clear(); listingReviewState.busy = false;
   listingReviewState.view = 'CURRENT';
   for (const id of ['listingReviewList', 'listingReviewDetail', 'listingReviewPages', 'listingReviewStatus',
-    'privacyMaintenanceStatus','privacyMaintenanceJobs','privacyMaintenanceEvidence','privacyMaintenancePages']) {
+    'privacyMaintenanceStatus','privacyMaintenanceJobs','privacyMaintenanceEvidence','privacyMaintenancePages','privacyEvidenceStatus']) {
     const node = document.getElementById(id); if (node) node.replaceChildren();
   }
 }
@@ -85,14 +85,54 @@ async function listingReviewRequest(context, endpoint, command, bytes = false, p
       throw new Error(typeof failure.error === 'string' ? failure.error.slice(0, 500) : '读取未完成，请刷新后重试。');
     }
     if (bytes) {
-      const type = response.headers.get('Content-Type') || '';
+      const type = response.headers.get('Content-Type')?.split(';')[0] || '', limit = 10485760;
       if (!['image/jpeg','image/png','image/gif','image/webp'].includes(type)) throw new Error('图片响应无效。');
-      const blob = await response.blob();
-      if (blob.size > 10485760) throw new Error('图片响应过大。');
+      if (Number(response.headers.get('Content-Length')) > limit) throw new Error('图片响应过大。');
+      let blob;
+      if (response.body?.getReader) {
+        const reader = response.body.getReader(), chunks = []; let size = 0;
+        try {
+          while (true) {
+            const part = await reader.read(); if (part.done) break;
+            size += part.value.byteLength;
+            if (!context.current() || controller.signal.aborted || size > limit) throw new Error('图片读取未完成。');
+            chunks.push(part.value);
+          }
+          blob = new Blob(chunks, { type });
+        } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
+      } else blob = await response.blob();
+      if (!context.current() || controller.signal.aborted || !blob.size || blob.size > limit) throw new Error('图片读取未完成。');
       return blob;
     }
     return await response.json();
   } finally { clearTimeout(timer); listingReviewState.controllers.delete(controller); }
+}
+async function loadListingReviewImage(context, endpoint, alt) {
+  const blob = await listingReviewRequest(context, endpoint, null, true);
+  if (!context.current()) throw new Error('页面已变化。');
+  const url = URL.createObjectURL(blob), image = document.createElement('img');
+  const controller = new AbortController(); listingReviewState.controllers.add(controller);
+  listingReviewState.urls.add(url);
+  image.alt = alt; image.className = 'max-w-full max-h-80 object-contain'; image.src = url;
+  let rejectDecode;
+  const aborted = () => rejectDecode?.(new Error('图片显示未完成。'));
+  controller.signal.addEventListener('abort', aborted, { once: true });
+  const timer = setTimeout(() => controller.abort(), 15000);
+  try {
+    await Promise.race([image.decode(), new Promise((_, reject) => { rejectDecode = reject; })]);
+    if (!context.current() || controller.signal.aborted || !image.naturalWidth || !image.naturalHeight) throw new Error();
+    return image;
+  } catch {
+    image.removeAttribute('src'); URL.revokeObjectURL(url); listingReviewState.urls.delete(url);
+    throw new Error('图片无法正常显示，请重试；全部图片可查看后才能通过审核或结案。');
+  } finally {
+    clearTimeout(timer); controller.signal.removeEventListener('abort', aborted); listingReviewState.controllers.delete(controller);
+  }
+}
+function clearListingReviewImages(host) {
+  host.replaceChildren();
+  for (const url of listingReviewState.urls) URL.revokeObjectURL(url);
+  listingReviewState.urls.clear();
 }
 async function loadListingReviews(page = 1) {
   clearListingReview();
@@ -187,24 +227,26 @@ async function openExpiredListingAppeal(id) {
     label.appendChild(document.createTextNode(' 已核查本轮申诉及原审核证据，确认此结案决定')); host.appendChild(label);
     const close = document.createElement('button'); close.type = 'button'; close.className = 'btn-gray'; close.textContent = '确认结案'; host.appendChild(close);
     const status = paragraph('证据不可读取或不完整时，请保留待处理。'); status.setAttribute('role', 'status');
-    let imagesReady = row.imageCount === 0;
+    let imagesReady = row.imageCount === 0, imagesLoading = false;
     const update = () => {
-      close.disabled = listingReviewState.busy || !imagesReady || !acknowledged.checked || !outcome.value || reason.value.trim().length < 5;
+      close.disabled = listingReviewState.busy || imagesLoading || !imagesReady || !acknowledged.checked || !outcome.value || reason.value.trim().length < 5 || reason.value.trim().length > 500;
       outcome.disabled = reason.disabled = acknowledged.disabled = listingReviewState.busy;
+      imageButton.disabled = listingReviewState.busy || imagesLoading || imagesReady;
     };
     outcome.addEventListener('change', update); reason.addEventListener('input', update); acknowledged.addEventListener('change', update); update();
     imageButton.addEventListener('click', async () => {
-      imageButton.disabled = true; imageHost.replaceChildren();
-      for (const url of listingReviewState.urls) URL.revokeObjectURL(url); listingReviewState.urls.clear();
+      if (!context.current() || listingReviewState.busy || imagesLoading || imagesReady) return;
+      imagesLoading = true; imagesReady = false; clearListingReviewImages(imageHost); update();
       try {
         for (let index = 0; index < row.imageCount; index++) {
-          const blob = await listingReviewRequest(context, `/appeals/${id}/images/${index}`, null, true);
+          status.textContent = `正在打开原审核图片 ${index + 1}/${row.imageCount}…`;
+          const img = await loadListingReviewImage(context, `/appeals/${id}/images/${index}`, `原审核图片 ${index + 1}`);
           if (!context.current()) return;
-          const url = URL.createObjectURL(blob); listingReviewState.urls.add(url);
-          const img = document.createElement('img'); img.src = url; img.alt = `原审核图片 ${index + 1}`; img.className = 'max-w-xs max-h-80 object-contain'; imageHost.appendChild(img);
+          imageHost.appendChild(img);
         }
-        imagesReady = true; status.textContent = '请结合申诉理由核查全部证据，再填写结案决定。'; update();
-      } catch (error) { if (context.current()) { status.textContent = `图片核查未完成，暂不能结案。${error.message}`; imageButton.disabled = false; } }
+        imagesReady = true; status.textContent = '请结合申诉理由核查全部证据，再填写结案决定。';
+      } catch (error) { if (context.current()) { clearListingReviewImages(imageHost); status.textContent = `图片核查未完成，暂不能结案。${error.message}`; } }
+      finally { if (context.current()) { imagesLoading = false; update(); } }
     });
     close.addEventListener('click', async () => {
       if (!context.current() || close.disabled || listingReviewState.busy) return;
@@ -213,7 +255,7 @@ async function openExpiredListingAppeal(id) {
         const result = await listingReviewRequest(context, `/appeals/${id}/close`, { operationKey: crypto.randomUUID(),
           reviewRevision: row.reviewRevision, appealRevision: row.appealRevision, outcome: outcome.value, reason: reason.value.trim() });
         if (!context.current()) return;
-        if (result.reviewId !== id || !['UPHELD','OVERTURNED'].includes(result.outcome)
+        if (result.reviewId !== id || result.outcome !== outcome.value || result.reason !== reason.value.trim()
           || result.publicationRestored !== false || result.requiresNewReview !== true) throw new Error('结案响应需核查。');
         await openExpiredListingAppeal(id);
       } catch (error) {
@@ -244,36 +286,47 @@ async function openListingReview(id) {
     if (row.appeal) { const p = document.createElement('p'); p.textContent = `申诉原因：${row.appeal}`; host.appendChild(p); }
     const imageHost = document.createElement('div'); imageHost.className = 'flex flex-wrap gap-3'; host.appendChild(imageHost);
     const imageButton = document.createElement('button'); imageButton.type = 'button'; imageButton.className = 'btn-gray my-3'; imageButton.textContent = '打开全部待审核图片';
-    let imagesReady = row.imageCount === 0;
+    let imagesReady = row.imageCount === 0, imagesLoading = false;
     imageButton.hidden = imagesReady; host.appendChild(imageButton);
     const status = document.createElement('p'); status.setAttribute('role', 'status'); host.appendChild(status);
     const reason = document.createElement('textarea'); reason.className = 'input w-full my-3'; reason.maxLength = 500;
     reason.setAttribute('aria-label', '审核决定理由'); reason.placeholder = '请说明审核决定（5–500 字，卖家可见）'; host.appendChild(reason);
     const approve = document.createElement('button'), reject = document.createElement('button');
     for (const [button, label] of [[approve, '通过审核'], [reject, '退回修改']]) { button.type = 'button'; button.className = 'btn-gray mr-3'; button.textContent = label; host.appendChild(button); }
-    const updateButtons = () => { approve.disabled = listingReviewState.busy || !imagesReady; reject.disabled = listingReviewState.busy; };
+    const updateButtons = () => {
+      const invalidReason = reason.value.trim().length < 5 || reason.value.trim().length > 500;
+      approve.disabled = listingReviewState.busy || imagesLoading || !imagesReady || invalidReason;
+      reject.disabled = listingReviewState.busy || imagesLoading || invalidReason;
+      reason.disabled = listingReviewState.busy;
+      imageButton.disabled = listingReviewState.busy || imagesLoading || imagesReady;
+    };
+    reason.addEventListener('input', updateButtons);
     updateButtons();
     imageButton.addEventListener('click', async () => {
-      imageButton.disabled = true; imageHost.replaceChildren();
-      for (const url of listingReviewState.urls) URL.revokeObjectURL(url);
-      listingReviewState.urls.clear();
+      if (!context.current() || listingReviewState.busy || imagesLoading || imagesReady) return;
+      imagesLoading = true; imagesReady = false; clearListingReviewImages(imageHost); updateButtons();
       try {
         for (let index = 0; index < row.imageCount; index++) {
-          const blob = await listingReviewRequest(context, `/${id}/images/${index}`, null, true);
+          status.textContent = `正在打开待审核图片 ${index + 1}/${row.imageCount}…`;
+          const img = await loadListingReviewImage(context, `/${id}/images/${index}`, `待审核图片 ${index + 1}`);
           if (!context.current()) return;
-          const url = URL.createObjectURL(blob); listingReviewState.urls.add(url);
-          const img = document.createElement('img'); img.src = url; img.alt = `待审核图片 ${index + 1}`; img.className = 'max-w-xs max-h-80 object-contain'; imageHost.appendChild(img);
+          imageHost.appendChild(img);
         }
-        imagesReady = true; status.textContent = '请核查全部图片后作出决定。'; updateButtons();
-      } catch (error) { if (context.current()) { status.textContent = error.message; imageButton.disabled = false; } }
+        imagesReady = true; status.textContent = '请核查全部图片后作出决定。';
+      } catch (error) { if (context.current()) { clearListingReviewImages(imageHost); status.textContent = error.message; } }
+      finally { if (context.current()) { imagesLoading = false; updateButtons(); } }
     });
     const decide = async action => {
-      if (!context.current() || listingReviewState.busy) return;
-      const explanation = reason.value.trim(); if (explanation.length < 5) { status.textContent = '请填写至少 5 字的审核理由。'; return; }
+      if (!context.current() || listingReviewState.busy || imagesLoading || (action === 'APPROVE' && !imagesReady)) return;
+      const explanation = reason.value.trim(); if (explanation.length < 5 || explanation.length > 500) { status.textContent = '请填写 5–500 字的审核理由。'; return; }
       listingReviewState.busy = true; updateButtons();
       try {
-        await listingReviewRequest(context, `/${id}/decision`, { operationKey: crypto.randomUUID(), revision: row.revision, action, reason: explanation });
-        if (context.current()) await loadListingReviews();
+        const result = await listingReviewRequest(context, `/${id}/decision`, { operationKey: crypto.randomUUID(), revision: row.revision, action, reason: explanation });
+        if (!context.current()) return;
+        if (result.id !== id || result.revision !== row.revision + 1 || result.status !== (action === 'APPROVE' ? 'APPROVED' : 'REJECTED')
+          || result.decisionReason !== explanation || result.published !== false || result.canDecide !== false) throw new Error('审核回执不匹配，请核查结果。');
+        await loadListingReviews();
+        if (authToken === context.token && state.currentSection === 'listingReview') showSuccess(action === 'APPROVE' ? '审核已通过。商品尚未发布，卖家需要重新提交发布。' : '已退回修改，卖家可查看审核理由。');
       } catch (error) {
         if (context.current()) status.textContent = `未确认操作结果，请先刷新审核状态。${error.message}`;
         // Keep writes disabled after uncertainty; refresh observes the result.
@@ -283,7 +336,14 @@ async function openListingReview(id) {
   } catch (error) { if (context.current()) setText('listingReviewStatus', error.message); }
 }
 
+function validEvidenceMaintenanceReceipt(row) {
+  return row && /^[a-f0-9-]{36}$/i.test(row.id) && Number.isSafeInteger(row.revision) && row.revision > 0 && row.attached === false
+    && ['PENDING','VERIFY_REQUIRED','RECONCILING','AVAILABLE','MISSING','DELETE_PENDING','DELETE_UNCERTAIN','DELETED'].includes(row.status)
+    && row.overallCompleted === false && row.backupVerification === 'PENDING'
+    && Number.isFinite(Date.parse(row.createdAt)) && (row.cleanupEligibleAfter === null || Number.isFinite(Date.parse(row.cleanupEligibleAfter)));
+}
 async function loadPrivacyMaintenance(page = 1) {
+  if (!Number.isSafeInteger(page) || page < 1 || page > 10000) return;
   clearListingReview();
   const context = listingReviewContext('privacyMaintenance'); if (!context.current()) return;
   setText('privacyMaintenanceStatus', '正在读取维护状态…');
@@ -334,27 +394,38 @@ async function loadPrivacyMaintenance(page = 1) {
   if (!context.current()) return;
   try {
     const data = await request('/admin/evidence-maintenance', `?page=${page}`); if (!context.current()) return;
-    if (!Array.isArray(data.rows) || data.rows.length > 25 || !Number.isSafeInteger(data.total) || data.total < 0) throw new Error('附件队列响应无效。');
+    if (!Array.isArray(data.rows) || data.rows.length > 25 || !Number.isSafeInteger(data.total) || data.total < 0 || data.page !== page || data.pageSize !== 25
+      || data.rows.some(row => !validEvidenceMaintenanceReceipt(row)) || new Set(data.rows.map(row => row.id)).size !== data.rows.length) throw new Error('附件队列响应无效。');
     const host = document.getElementById('privacyMaintenanceEvidence');
     const labels = { PENDING: '上传待确认', VERIFY_REQUIRED: '需要核查', RECONCILING: '核查中', AVAILABLE: '已确认上传', MISSING: '未找到对象', DELETE_PENDING: '清理待确认', DELETE_UNCERTAIN: '清理结果不明', DELETED: '线上对象已清理' };
     for (const row of data.rows) {
-      if (!/^[a-f0-9-]{36}$/i.test(row.id) || !Number.isSafeInteger(row.revision) || row.revision < 1 || row.attached !== false) throw new Error('附件记录无效。');
       const card = document.createElement('div'); card.className = 'card';
       const p = document.createElement('p'); p.textContent = `${labels[row.status] || '状态待确认'} · ${formatDateTime(row.createdAt)}`; card.appendChild(p);
-      for (const [action, text] of [['RECONCILE','核查上传结果'],['RETIRE','清理过期附件']]) {
+      const retiring = ['DELETE_PENDING','DELETE_UNCERTAIN'].includes(row.status);
+      let busy = false; const buttons = [];
+      const update = () => buttons.forEach(({ button, unavailable }) => { button.disabled = busy || unavailable; });
+      const actions = row.status === 'DELETED' ? [] : retiring ? [['RETIRE','核查并继续清理']] : [['RECONCILE','核查上传结果'],['RETIRE','清理过期附件']];
+      for (const [action, text] of actions) {
         const button = document.createElement('button'); button.type = 'button'; button.className = 'btn-gray mr-3 mt-3'; button.textContent = text;
-        button.disabled = action === 'RETIRE' && (!Number.isFinite(Date.parse(row.cleanupEligibleAfter)) || Date.parse(row.cleanupEligibleAfter) > Date.now());
+        const unavailable = action === 'RETIRE' && (!Number.isFinite(Date.parse(row.cleanupEligibleAfter)) || Date.parse(row.cleanupEligibleAfter) > Date.now());
+        buttons.push({ button, unavailable }); update();
         button.addEventListener('click', async () => {
-          if (!context.current()) return;
+          if (!context.current() || busy || unavailable) return;
+          busy = true; update();
           if (action === 'RETIRE') {
             const confirmation = await openAdminDialog({ title: '清理过期未提交附件', bodyHtml: '<p>仅处理这一个尚未提交的附件。已关联举报或存在保全时会停止。确认继续？</p>', confirmText: '确认处理', cancelText: '取消', presentation: 'drawer' });
-            if (!confirmation.confirmed || !context.current()) return;
+            if (!context.current()) return;
+            if (!confirmation.confirmed) { busy = false; update(); return; }
           }
-          for (const entry of card.querySelectorAll('button')) entry.disabled = true;
           try {
-            await request('/admin/evidence-maintenance', `/${row.id}`, { revision: row.revision, action });
-            if (context.current()) await loadPrivacyMaintenance(page);
-          } catch (error) { if (context.current()) setText('privacyMaintenanceStatus', `未确认处理结果，请先刷新。${error.message}`); }
+            const result = await request('/admin/evidence-maintenance', `/${row.id}`, { revision: row.revision, action });
+            if (!context.current()) return;
+            if (!validEvidenceMaintenanceReceipt(result) || result.id !== row.id || result.revision < row.revision) throw new Error('处理回执不匹配。');
+            await loadPrivacyMaintenance(page);
+            if (authToken === context.token && state.currentSection === 'privacyMaintenance') setText('privacyEvidenceStatus',
+              result.status === 'DELETED' ? '本次已确认线上附件清理，备份仍待核查。' : result.status === 'AVAILABLE' ? '本次已确认上传，附件继续保留。'
+                : result.status === 'MISSING' ? '本次核查未找到对象；不代表全部资料已清理。' : '本次处理结果仍待确认。请刷新状态后再决定是否继续。');
+          } catch (error) { if (context.current()) setText('privacyEvidenceStatus', `未确认处理结果，请先刷新；不要重复点击。${error.message}`); }
         });
         card.appendChild(button);
       }
@@ -2182,6 +2253,7 @@ const deletionReview = { generation: 0, detailGeneration: 0, jobsGeneration: 0, 
 
 function clearDeletionReview() {
   erasureGeneration += 1;
+  erasurePending = null;
   erasureRows.clear();
   for (const id of ['erasureRequests', 'erasurePagination']) document.getElementById(id)?.replaceChildren();
   setText('erasureStatus', '');
@@ -6024,16 +6096,19 @@ async function loadMediaUploads(page = 1) {
 // Separate execution queue: only user-confirmed erasures, never generic
 // "approve deletion" checkboxes on a read-only dependency preview.
 let erasureGeneration = 0;
+let erasurePending = null;
 const erasureRows = new Map();
 function validErasure(row) {
-  return row && deletionRequestIdPattern.test(row.id) && ['MEDIA_PENDING','COMPLETE'].includes(row.state)
-    && row.onlineRemoved === true && row.onlineCompleted === (row.state === 'COMPLETE')
+  return row && deletionRequestIdPattern.test(row.id) && ['PROCESSING','MEDIA_PENDING','COMPLETE'].includes(row.state)
+    && typeof row.onlineRemoved === 'boolean' && (row.state === 'PROCESSING' || row.onlineRemoved === true) && row.onlineCompleted === (row.state === 'COMPLETE')
+    && row.backups === 'POLICY_WINDOW_UNVERIFIED'
     && deletionDate(row.deadlineAt) && typeof row.message === 'string' && row.message.length <= 1000;
 }
 async function loadErasureRequests(page = 1) {
   if (!Number.isSafeInteger(page) || page < 1 || page > 10000 || state.currentSection !== 'deletionReview') return;
   const token = authToken, marker = ++erasureGeneration;
-  const current = () => authToken === token && erasureGeneration === marker && state.currentSection === 'deletionReview';
+  const current = () => !!token && authToken === token && erasureGeneration === marker && state.currentSection === 'deletionReview';
+  erasurePending = null;
   erasureRows.clear();
   document.getElementById('erasureRequests').replaceChildren();
   document.getElementById('erasurePagination').replaceChildren();
@@ -6044,25 +6119,32 @@ async function loadErasureRequests(page = 1) {
     if (!Array.isArray(data.rows) || data.rows.length > 25 || !deletionCount(data.total) || data.page !== page
       || data.pageSize !== 25 || data.rows.some(row => !validErasure(row))
       || new Set(data.rows.map(row => row.id)).size !== data.rows.length) throw new Error('DELETION_INVALID_RESPONSE');
-    for (const row of data.rows) erasureRows.set(row.id, { row, page, token, marker });
+    for (const row of data.rows) if (row.state === 'MEDIA_PENDING') erasureRows.set(row.id, { row, page, token, marker });
     document.getElementById('erasureRequests').innerHTML = data.rows.map(row => `<div class="border rounded p-3">
       <p>申请 ${escapeHtml(row.id)}</p>
       <p class="text-sm ${Date.parse(row.deadlineAt) < Date.now() ? 'text-red-600' : 'text-gray-600'}">目标日期：${escapeHtml(formatDateTime(row.deadlineAt))}</p>
-      <p class="text-sm">${row.code === 'UPLOAD_SETTLING' ? '正在等待刚才的上传结束，请两分钟后继续。' : row.code === 'MEDIA_RETRY_REQUIRED' ? '存储处理未确认完成，请检查存储配置后继续。' : '登记图片待清理。'}</p>
-      <button type="button" class="btn-red mt-2" data-erasure="${row.id}" onclick="processErasureRequest('${row.id}')">处理下一批图片</button>
+      <p class="text-sm">${row.state === 'PROCESSING' ? '账号注销正在处理中，请稍后刷新，当前无需再次提交。' : row.state === 'COMPLETE' ? '线上处理已完成，备份仍按保留政策处理。' : row.code === 'UPLOAD_SETTLING' ? '正在等待刚才的上传结束，请两分钟后继续。' : row.code === 'MEDIA_RETRY_REQUIRED' ? '存储处理未确认完成，请检查存储配置后继续。' : '登记图片待清理。'}</p>
+      ${row.state === 'MEDIA_PENDING' ? `<button type="button" class="btn-red mt-2" data-erasure="${row.id}" onclick="processErasureRequest('${row.id}')">处理下一批图片</button>` : ''}
       </div>`).join('');
     setText('erasureStatus', data.total ? `共 ${data.total} 份待处理；此操作会实际删除对应用户的登记图片。` : '没有待处理的图片清理。');
     renderPagination('erasurePagination', page, Math.min(10000, Math.ceil(data.total / 25)), loadErasureRequests);
-  } catch (error) { if (current()) setText('erasureStatus', '未能读取图片清理队列，可能尚未启用。请稍后刷新。'); }
+  } catch (error) { if (current()) setText('erasureStatus', '图片清理队列未确认，可能是网络、权限或服务状态变化。请刷新；这不代表已经清理完成。'); }
 }
 async function processErasureRequest(id) {
   const selected = erasureRows.get(id);
-  if (!selected || selected.token !== authToken || selected.marker !== erasureGeneration || state.currentSection !== 'deletionReview') return;
-  if (!confirm('此用户已确认注销。现在实际清理下一批登记图片？这不会删除其他账号的图片。')) return;
+  if (!selected || selected.token !== authToken || selected.marker !== erasureGeneration || state.currentSection !== 'deletionReview'
+    || erasurePending?.marker === erasureGeneration) return;
   const { token, marker, page } = selected;
   const current = () => token === authToken && marker === erasureGeneration && state.currentSection === 'deletionReview';
-  if (!current()) return;
+  erasurePending = { token, marker };
   document.querySelectorAll('[data-erasure]').forEach(button => { button.disabled = true; });
+  const confirmation = await openAdminDialog({ title: '处理已注销账号的登记图片',
+    bodyHtml: '<p>此用户已确认注销。本次实际清理下一批本人登记图片，不删除其他账号的图片；结果不明时先刷新核查。</p>',
+    confirmText: '确认处理下一批', cancelText: '取消', presentation: 'drawer' });
+  if (!current()) return;
+  if (!confirmation.confirmed) {
+    erasurePending = null; document.querySelectorAll('[data-erasure]').forEach(button => { button.disabled = false; }); return;
+  }
   const controller = new AbortController(); deletionReview.controllers.add(controller);
   const timeout = setTimeout(() => controller.abort(), 60000);
   try {
@@ -6074,6 +6156,9 @@ async function processErasureRequest(id) {
     if (!current()) return;
     if (!response.ok || !validErasure(data.receipt) || data.receipt.id !== id) throw new Error('ERASURE_UNKNOWN');
     await loadErasureRequests(page);
+    if (token === authToken && state.currentSection === 'deletionReview') setText('erasureStatus', data.receipt.state === 'COMPLETE'
+      ? '本次已确认线上内容和登记图片处理完成。备份仍按保留政策处理，未标记为已清除。'
+      : '本次仍有图片待处理或待核查，请查看刷新后的队列；无需再次注销账号。');
   } catch {
     if (current()) setText('erasureStatus', '本次结果未确认，可能已有部分图片处理完成。请先“查看待处理”刷新结果，再决定是否继续。');
   } finally { clearTimeout(timeout); deletionReview.controllers.delete(controller); }
