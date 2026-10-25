@@ -3859,8 +3859,10 @@ async function loadOrders(page = 1) {
 }
 
 const orderHistoryView = { generation: 0, orderId: null, token: null, controller: null,
-  previewController: null, previewGeneration: 0, previewUrl: null, cursor: null, busy: false, count: 0, evidence: new Map() };
-function closeOrderEvidence() {
+  previewController: null, previewGeneration: 0, previewUrl: null, previewReturnFocus: null, cursor: null, busy: false, count: 0, evidence: new Map() };
+function closeOrderEvidence(restoreFocus = false) {
+  const returnTo = orderHistoryView.previewReturnFocus;
+  orderHistoryView.previewReturnFocus = null;
   orderHistoryView.previewGeneration++;
   orderHistoryView.previewController?.abort(); orderHistoryView.previewController = null;
   if (orderHistoryView.previewUrl) URL.revokeObjectURL(orderHistoryView.previewUrl);
@@ -3868,6 +3870,9 @@ function closeOrderEvidence() {
   document.getElementById('orderEvidenceImage')?.removeAttribute('src');
   document.getElementById('orderEvidencePreview')?.classList.add('hidden');
   setText('orderEvidenceStatus', '');
+  if (restoreFocus && returnTo?.isConnected) {
+    returnTo.focus(); returnTo.scrollIntoView?.({ block: 'nearest' });
+  }
 }
 function clearOrderHistoryView() {
   orderHistoryView.generation++;
@@ -3945,8 +3950,10 @@ async function openOrderEvidence(handle) {
   const {generation,token,orderId}=orderHistoryView, path=orderHistoryView.evidence.get(handle);
   if(!orderHistoryCurrent(generation,token,orderId)||!orderEvidencePath(path,orderId))return;
   closeOrderEvidence();const preview=orderHistoryView.previewGeneration;
+  orderHistoryView.previewReturnFocus = document.activeElement;
   document.getElementById('orderEvidencePreview')?.classList.remove('hidden');
   setText('orderEvidenceStatus','正在核对访问权限并读取图片…');
+  document.getElementById('orderEvidencePreview')?.scrollIntoView?.({ block: 'start' });
   const controller=new AbortController();orderHistoryView.previewController=controller;
   const timer=setTimeout(()=>controller.abort(),20000);
   const current=()=>orderHistoryCurrent(generation,token,orderId)&&preview===orderHistoryView.previewGeneration&&!controller.signal.aborted;
@@ -3962,6 +3969,7 @@ async function openOrderEvidence(handle) {
     if(!blob.size||blob.size>max)throw new Error();if(!current())return;
     const url=URL.createObjectURL(blob);orderHistoryView.previewUrl=url;
     document.getElementById('orderEvidenceImage')?.setAttribute('src',url);setText('orderEvidenceStatus','');
+    document.getElementById('orderEvidencePreview')?.scrollIntoView?.({ block: 'nearest' });
   } catch {if(orderHistoryCurrent(generation,token,orderId)&&preview===orderHistoryView.previewGeneration)setText('orderEvidenceStatus','图片无法读取。可能已清理、归属无法核验、登录权限变化或暂时断网；可重新点击查看。');}
   finally{clearTimeout(timer);}
 }
@@ -4020,9 +4028,9 @@ async function openOrderDetail(orderId) {
           <div id="orderHistoryList" class="space-y-3"></div>
           <button type="button" id="orderHistoryMore" class="btn-gray hidden mt-3" onclick="loadOrderHistory(true)">加载后续事件</button>
           <div id="orderEvidencePreview" class="hidden mt-4 border rounded p-3">
-            <button type="button" class="btn-gray mb-2" onclick="closeOrderEvidence()">关闭图片</button>
+            <button type="button" class="btn-gray mb-2" onclick="closeOrderEvidence(true)">关闭图片</button>
             <p id="orderEvidenceStatus" role="status" class="text-sm"></p>
-            <img id="orderEvidenceImage" alt="订单验货证据" class="max-w-full rounded" />
+            <img id="orderEvidenceImage" alt="订单验货证据" class="max-w-full max-h-[65vh] object-contain rounded" />
             <p class="text-xs text-gray-600 mt-2">图片是交易相关方提交的材料，不代表平台已核实商品质量或付款。</p>
           </div>
         </section>
