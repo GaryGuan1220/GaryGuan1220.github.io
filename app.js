@@ -825,7 +825,8 @@ const adminDisplayLabels = {
   "SELF_PICKUP": "自取",
   "PLATFORM_DELIVERY": "平台配送",
   "LEGACY_UNKNOWN": "历史记录，方式未确认",
-  "OFFLINE_C2C": "买卖双方线下付款",
+  "OFFLINE_C2C": "双方自行交接（平台不收款）",
+  "OFFLINE_GIFT": "免费赠送，无需付款",
   "UNKNOWN": "未确认",
   "CASH": "现金",
   "STRIPE": "Stripe",
@@ -4075,17 +4076,18 @@ async function openOrderEvidence(handle) {
 document.addEventListener('visibilitychange',()=>{if(document.hidden)closeOrderEvidence();});
 
 function renderOrderProgress(order) {
+  const isFreeGift = order.payMethod === 'OFFLINE_GIFT' && Number(order.amount) === 0;
   const isSelfPickup = order.fulfillmentMethod === 'SELF_PICKUP' && order.fundingSource === 'OFFLINE_C2C';
   const canonical = order.recordState === 'CANONICAL';
   const rows = [`创建订单：${formatDateTime(order.createdAt)}`];
   if (order.paidAt) rows.push(`${isSelfPickup && canonical ? '买家声明已线下付款' : '付款登记'}：${formatDateTime(order.paidAt)}`);
   rows.push(`最近更新：${formatDateTime(order.updatedAt)} · ${adminLabel(order.status)}`);
-  const note = isSelfPickup
+  const note = isFreeGift ? '免费赠送，无需付款；完成记录表示已确认交接。' : isSelfPickup
     ? canonical ? '线下付款由买家声明，平台未收取或核验款项。' : '历史记录不能据此核定验货或线下付款。'
     : '';
   return `<div class="rounded border p-3 my-3"><p class="font-semibold">处理进度</p>
     <ul class="list-disc pl-5">${rows.map(row => `<li>${escapeHtml(row)}</li>`).join('')}</ul>
-    ${isSelfPickup && !order.paidAt ? '<p class="mt-2">尚无买家线下付款声明记录。</p>' : ''}
+    ${isSelfPickup && !isFreeGift && !order.paidAt ? '<p class="mt-2">尚无买家线下付款声明记录。</p>' : ''}
     ${note ? `<p class="text-sm text-gray-600 mt-2">${note}</p>` : ''}</div>`;
 }
 
