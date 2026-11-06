@@ -48,3 +48,5 @@
 #soDialog{width:min(900px,92vw);max-height:88vh;border:1px solid #ddd;border-radius:16px;padding:24px;overflow:auto}#soDialog::backdrop{background:#0008}#soDialog textarea{min-height:100px}#soDetail .sc-kv span:last-child{white-space:pre-wrap;overflow-wrap:anywhere}#soStatus,#soError{white-space:pre-wrap;color:#a51e36}#soList .sc-row{display:flex;flex-direction:column;gap:8px}#soRates button{margin-left:12px}#soDetail .sc-tools{flex-wrap:wrap}#soPhotos img{max-height:260px;object-fit:contain}@media(prefers-color-scheme:dark){#soDialog{color:#eee;background:#202124;border-color:#555}#soDialog input,#soDialog textarea,#soDialog select{color:#eee;background:#303134}#soError,#soStatus{color:#ff9cab}}
 
 #soSearch{display:flex;align-items:end;gap:10px;margin:16px 0}#soSearch label{flex:1}#soDialog label{display:block;margin:12px 0}#soDialog label span{display:block;margin-bottom:6px}#soDialog input[type=checkbox]{margin-right:8px}#soDialog h3{margin-bottom:14px}
+
+@media(prefers-color-scheme:dark){#serviceOperationsSection #soDialog .sc-field{color:#eee}}
