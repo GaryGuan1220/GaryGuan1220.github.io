@@ -1,0 +1,53 @@
+#serviceFieldSection{--sc-red:#bd2944;color:#20252d;max-width:1440px;margin:auto}
+#serviceFieldSection *{box-sizing:border-box}
+#serviceFieldSection .sc-head{display:flex;justify-content:space-between;align-items:center;gap:18px;margin-bottom:18px}
+#serviceFieldSection h2{font-size:28px;font-weight:700;margin:0}
+#serviceFieldSection h3{font-size:19px;font-weight:650;margin:0 0 14px}
+#serviceFieldSection h4{font-size:15px;font-weight:650;margin:14px 0 8px}
+#serviceFieldSection p{margin:8px 0;white-space:pre-wrap;overflow-wrap:anywhere}
+#serviceFieldSection .sc-muted{color:#596574;font-size:13px;line-height:1.65}
+#serviceFieldSection button{font:inherit;cursor:pointer;border:1px solid #cbd2da;border-radius:9px;background:white;padding:9px 13px;color:#283240}
+#serviceFieldSection button:hover:not(:disabled){border-color:var(--sc-red);color:var(--sc-red)}
+#serviceFieldSection button:disabled{opacity:.48;cursor:not-allowed}
+#serviceFieldSection .sc-primary{background:var(--sc-red);border-color:var(--sc-red);color:#fff}
+#serviceFieldSection .sc-primary:hover:not(:disabled){background:#a31f38;color:white}
+#serviceFieldSection .sc-tools{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+#serviceFieldSection input:not([type=checkbox]),#serviceFieldSection select,#serviceFieldSection textarea{border:1px solid #bdc6d1;border-radius:8px;background:white;color:#182230;padding:9px 11px;width:100%;font:inherit}
+#serviceFieldSection input:focus,#serviceFieldSection select:focus,#serviceFieldSection textarea:focus,#serviceFieldSection button:focus-visible{outline:3px solid #f3b7c2;outline-offset:2px}
+#serviceFieldSection .sc-tools input{flex:1;min-width:150px}#serviceFieldSection .sc-tools select{width:auto;max-width:200px}
+#serviceFieldSection .sc-notice{background:#fff5e6;border:1px solid #efd3a5;border-radius:10px;padding:12px 15px;font-size:13px;line-height:1.6}
+#serviceFieldSection .sc-error{color:#a61b2e;white-space:pre-wrap}
+#serviceFieldSection .sc-layout{display:grid;grid-template-columns:minmax(240px,30%) minmax(0,1fr);gap:20px;margin-top:20px}
+#serviceFieldSection .sc-list{max-height:72vh;overflow:auto;display:flex;flex-direction:column;gap:10px;padding:2px}
+#serviceFieldSection .sc-row{text-align:left;display:block;width:100%;padding:14px;border-radius:12px;background:white}
+#serviceFieldSection .sc-row[aria-pressed=true]{border:2px solid var(--sc-red);background:#fff7f8}
+#serviceFieldSection .sc-card{background:#fff;border:1px solid #e1e6ec;border-radius:14px;padding:20px;margin-bottom:16px;overflow-wrap:anywhere}
+#serviceFieldSection .sc-badge{display:inline-block;background:#fce9ed;color:#98233a;border-radius:5px;font-size:12px;padding:2px 6px;margin:3px}
+#serviceFieldSection .sc-tabs{display:flex;gap:5px;flex-wrap:wrap;margin:14px 0}
+#serviceFieldSection .sc-tabs [aria-selected=true]{background:#fce9ed;border-color:var(--sc-red);color:#92253a}
+#serviceFieldSection .sc-kv{display:grid;grid-template-columns:minmax(110px,1fr) minmax(80px,1.3fr);gap:10px;border-bottom:1px solid #edf0f3;padding:10px 0;align-items:start}
+#serviceFieldSection .sc-kv span:last-child{text-align:right;white-space:pre-wrap;overflow-wrap:anywhere}
+#serviceFieldSection .sc-table{width:100%;border-collapse:collapse;font-size:13px}
+#serviceFieldSection td,#serviceFieldSection th{padding:10px 6px;text-align:left;border-bottom:1px solid #e8ecf0;vertical-align:top}
+#serviceFieldSection .sc-scroll{overflow:auto}
+#serviceFieldSection details{margin:10px 0}#serviceFieldSection summary{cursor:pointer;font-weight:600}
+#serviceFieldSection dialog{width:min(760px,95vw);max-height:90vh;overflow:auto;border:0;border-radius:16px;padding:26px;box-shadow:0 20px 80px #0003}
+#serviceFieldSection dialog::backdrop{background:#13203288}
+#serviceFieldSection .sc-form-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+#serviceFieldSection .sc-field{display:block;font-size:14px;color:#344050}
+#serviceFieldSection .sc-field>span{display:block;margin-bottom:7px;font-weight:600}
+#serviceFieldSection .sc-wide{grid-column:1/-1}
+#serviceFieldSection .sc-check{display:flex;gap:9px;align-items:flex-start;margin:10px 0;line-height:1.6;font-size:14px}
+#serviceFieldSection .sc-check input{margin-top:5px}
+#serviceFieldSection .sc-tier{display:grid;grid-template-columns:1fr 1fr auto;gap:8px;margin:8px 0}
+#serviceFieldSection .sc-footer{display:flex;justify-content:flex-end;gap:10px;margin-top:20px}
+#serviceFieldSection .sc-photo-grid{display:flex;gap:12px;flex-wrap:wrap;margin-top:12px}
+#serviceFieldSection .sc-photo-grid img{max-width:230px;max-height:230px;object-fit:contain;border:1px solid #dde3e8;border-radius:10px}
+@media(max-width:1100px){#serviceFieldSection .sc-layout{grid-template-columns:1fr}#serviceFieldSection .sc-list{max-height:280px}#serviceFieldSection .sc-form-grid{grid-template-columns:1fr}#serviceFieldSection .sc-head{align-items:flex-start;flex-direction:column}}
+
+#serviceFieldSection [hidden]{display:none!important}
+#serviceFieldSection #sdScheduleFilter .sc-field{flex:1;min-width:200px}
+#serviceFieldSection fieldset legend{font-weight:600;padding:6px;overflow-wrap:anywhere}
+#serviceFieldSection .sd-fee{padding:12px 0;border-bottom:1px solid #ddd}
+
+#serviceFieldSection .sf-evidence { border-top:1px solid #ddd; padding-top:12px; }

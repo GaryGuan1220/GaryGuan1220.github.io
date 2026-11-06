@@ -2129,6 +2129,10 @@ function getAdminRootUrl() {
 }
 
 function clearAdminSession() {
+  window.ServiceResourcesAdmin?.clear();
+  window.ServiceFieldAdmin?.clear();
+  window.ServiceDispatchAdmin?.clear();
+  window.ServiceCommerceAdmin?.clear();
   clearOrderHistoryView();
   adminResponseGeneration++;
   state.featureFlags.loaded = false;
@@ -2195,6 +2199,10 @@ async function logout() {
 }
 
 async function showSection(sectionName) {
+  if (sectionName !== 'serviceResources') window.ServiceResourcesAdmin?.clear();
+  if (sectionName !== 'serviceField') window.ServiceFieldAdmin?.clear();
+  if (sectionName !== 'serviceDispatch') window.ServiceDispatchAdmin?.clear();
+  if (sectionName !== 'serviceCommerce') window.ServiceCommerceAdmin?.clear();
   if (sectionName !== 'deletionReview') clearDeletionReview();
   if (sectionName !== 'listingReview') clearListingReview();
   state.currentSection = sectionName;
@@ -2224,6 +2232,18 @@ async function showSection(sectionName) {
   clearSelections();
 
   switch (sectionName) {
+    case 'serviceResources':
+      await window.ServiceResourcesAdmin?.open();
+      break;
+    case 'serviceField':
+      await window.ServiceFieldAdmin?.open();
+      break;
+    case 'serviceDispatch':
+      await window.ServiceDispatchAdmin?.open();
+      break;
+    case 'serviceCommerce':
+      await window.ServiceCommerceAdmin?.open();
+      break;
     case 'privacyMaintenance':
       await loadPrivacyMaintenance();
       break;
