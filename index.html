@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
   <link rel="stylesheet" href="service-field.css?v=20261106-runtime-sync">
   <link rel="stylesheet" href="service-resources.css?v=20261106-runtime-sync">
+  <link rel="stylesheet" href="service-operations.css?v=20261106-operations">
 </head>
 <body class="bg-gray-50">
   <nav class="bg-white shadow-sm border-b">
@@ -61,6 +62,7 @@
           <a href="#" onclick="showSection('orders')" class="menu-item"><i class="fas fa-receipt mr-3"></i>订单管理</a>
           <a href="#" onclick="showSection('serviceDispatch')" class="menu-item"><i class="fas fa-truck mr-3"></i>服务申请与调度</a>
           <a href="#" onclick="showSection('serviceResources')" class="menu-item"><i class="fas fa-people-carry mr-3"></i>工作端与仓位容量</a>
+          <a href="#" onclick="showSection('serviceOperations')" class="menu-item">配送、整屋与结算</a>
           <a href="#" onclick="showSection('serviceField')" class="menu-item"><i class="fas fa-clipboard-check mr-3"></i>现场验收与交接</a>
           <a href="#" onclick="showSection('serviceCommerce')" class="menu-item"><i class="fas fa-warehouse mr-3"></i>仓储与寄卖</a>
           <details class="nav-group mt-4"><summary class="px-5 py-2 cursor-pointer text-sm text-gray-600">维护与配置</summary>
@@ -81,6 +83,7 @@
       <main class="flex-1 min-w-0 p-6 lg:p-8 space-y-8">
         <section id="serviceDispatchSection" class="section hidden" aria-label="服务申请与取货调度"></section>
         <section id="serviceResourcesSection" class="section hidden" aria-label="工作端与仓库容量"></section>
+        <section id="serviceOperationsSection" class="section hidden" aria-label="配送整屋与结算"></section>
         <section id="serviceFieldSection" class="section hidden" aria-label="现场验收与交接"></section>
         <section id="serviceCommerceSection" class="section hidden" aria-label="仓储与寄卖管理"></section>
         <section id="privacyMaintenanceSection" class="section hidden">
@@ -1122,6 +1125,7 @@
   <script src="app.js?v=20261106-runtime-sync"></script>
   <script src="service-commerce.js?v=20261106-runtime-sync"></script>
   <script src="service-dispatch.js?v=20261106-runtime-sync"></script>
+  <script src="service-operations.js?v=20261106-operations"></script>
   <script src="service-field.js?v=20261106-runtime-sync"></script>
   <script src="service-resources.js?v=20261106-runtime-sync"></script>
 </body>

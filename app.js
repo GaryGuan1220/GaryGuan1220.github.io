@@ -2131,6 +2131,7 @@ function getAdminRootUrl() {
 function clearAdminSession() {
   window.ServiceResourcesAdmin?.clear();
   window.ServiceFieldAdmin?.clear();
+  window.ServiceOperationsAdmin?.clear();
   window.ServiceDispatchAdmin?.clear();
   window.ServiceCommerceAdmin?.clear();
   clearOrderHistoryView();
@@ -2199,7 +2200,9 @@ async function logout() {
 }
 
 async function showSection(sectionName) {
+  if (window.ServiceOperationsAdmin?.hasPending()) { alert('配送整屋模块还有待确认操作，请先核对原结果。'); return; }
   if (sectionName !== 'serviceResources') window.ServiceResourcesAdmin?.clear();
+  if (sectionName !== 'serviceOperations') window.ServiceOperationsAdmin?.clear();
   if (sectionName !== 'serviceField') window.ServiceFieldAdmin?.clear();
   if (sectionName !== 'serviceDispatch') window.ServiceDispatchAdmin?.clear();
   if (sectionName !== 'serviceCommerce') window.ServiceCommerceAdmin?.clear();
@@ -2234,6 +2237,9 @@ async function showSection(sectionName) {
   switch (sectionName) {
     case 'serviceResources':
       await window.ServiceResourcesAdmin?.open();
+      break;
+    case 'serviceOperations':
+      window.ServiceOperationsAdmin?.open();
       break;
     case 'serviceField':
       await window.ServiceFieldAdmin?.open();
