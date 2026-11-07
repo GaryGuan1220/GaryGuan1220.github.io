@@ -2,11 +2,11 @@
   "adminCommit": "7afe20e34c5d39943dce05ead829df1b9d8aa1fe",
   "backendCommit": "bb2dafb16b33898c44bff50bf6208156c7e4ab64",
   "includesUncommittedLatestSource": true,
-  "backendManifestSha256": "e4c5c56eaa3090c92e52d742032fe5f367599cc510ffa775f3cc5a64ab37a718",
+  "backendManifestSha256": "cd0c2bbc2a231ead1eece28de4126a3c0b5923f0e65a030bf41751b423739b20",
   "fileHashes": {
     "app.js": "6c6da3ead97c3a602b703612eeeae625ca060a18934c5a2e838b7667cabc30f8",
     "index.html": "eab147371212e617884ac2290388d6a939fd21fb0eca7e916e760af248873cfa",
-    "service-commerce.js": "a77feaac57e622b828fd3a095087f17db9e8bb01dfe2f30f303fd7d135d0ca75",
+    "service-commerce.js": "ff2892075d9c730f87da492d0d31869c95a41ee7a9d54aa331b824dd3b66ff40",
     "service-commerce.css": "15dfc1dca670f1d14af1634fb60aafd78e7acafeff94606b049b594f8dbfa844",
     "service-dispatch.js": "b6e28c75d1345d6766a535ccbdf1d6fcff099184f4e9b1484f4e847538766fa2",
     "service-dispatch.css": "200faec9aa855b1cdfe0b42a90345ea935be45e02b50ad5643f71fd853086597",
