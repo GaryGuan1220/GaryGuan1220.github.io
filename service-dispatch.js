@@ -10,7 +10,7 @@ window.ServiceDispatchAdmin = (() => {
   const controllers=new Set(),urls=new Set(),resourceRefs=new Set();
   const current=(g,t)=>active&&generation===g&&authToken===t&&!!t&&state.currentSection==='serviceDispatch';
   function releasePhotos(){photoGeneration++;for(const u of urls)URL.revokeObjectURL(u);urls.clear();$('sdPhotos')?.replaceChildren();}
-  function clear(){generation++;active=false;for(const c of controllers)c.abort();controllers.clear();releasePhotos();detail=null;booking=null;selected=null;pending=null;busy=false;loadingDetail=false;resourceRefs.clear();const d=$('sdDialog');if(d?.open)d.close();$('serviceDispatchSection')?.replaceChildren();}
+  function clear(){window.ServiceQuoteAssist?.close();generation++;active=false;for(const c of controllers)c.abort();controllers.clear();releasePhotos();detail=null;booking=null;selected=null;pending=null;busy=false;loadingDetail=false;resourceRefs.clear();const d=$('sdDialog');if(d?.open)d.close();$('serviceDispatchSection')?.replaceChildren();}
   const status=(t,error=false)=>{const e=$('sdStatus');if(e){e.textContent=t;e.className=error?'sc-error':'sc-muted';}};
   async function api(path,body){
     const g=generation,t=authToken,c=new AbortController();if(!current(g,t))throw Error('管理会话已变化。');controllers.add(c);const timer=setTimeout(()=>c.abort(),25000);
@@ -51,10 +51,10 @@ window.ServiceDispatchAdmin = (() => {
       body=card('联系人与取货条件',kv('联系人',f.contactName)+kv('电话',f.contactPhone)+kv('取货地址',f.address)+kv('楼层 / 电梯',`${f.floor||'未填写'} / ${f.elevator?'有':'无'}`)+msg(f.accessNotes)+kv('期望日期 / 时段',`${f.preferredDate} / ${f.preferredWindow}`)+kv('最晚搬空日期',f.deadline||'未填写')+msg(f.notes));
       if(f.kind==='MOVING')body+=card('送达条件',kv('送达地址',f.destination)+kv('收货联系人',f.destinationContact)+kv('楼层 / 电梯',`${f.destinationFloor||'未填写'} / ${f.destinationElevator?'有':'无'}`)+msg(f.destinationAccessNotes));
       body+=f.items.map(i=>card(i.name,kv('类别 / 数量 / 意向',`${i.category} / ${i.quantity} 件 / ${label(i.disposition)}`)+kv('尺寸 / 拆装',`${i.dimensions||'未填'} / ${i.disassembly?'需拆装':'无需拆装'}`)+msg('已申报成色与问题：'+i.condition)+msg('配件：'+(i.accessories||'未填'))+kv('预计寄存 / 期望价格',`${i.storageDays} 天 / ${i.expectedPriceCents===null?'未填':money(i.expectedPriceCents)}`)+i.photoIds.map((pid,n)=>btn('photo','查看照片 '+(n+1),false,`data-id="${esc(pid)}"`)).join(''))).join('');
-      body+=`<div class="sc-tools">${action('quote','填写逐件报价',!canQuote)}${action('needsInfo','退回补充资料',!canQuote)}${action('decline','说明无法受理',!canQuote)}</div>`;
+      body+=`<div class="sc-tools">${action('quote','填写逐件报价',!canQuote)}${action('quoteAssist','车型与搬运测算',!canQuote)}${action('needsInfo','退回补充资料',!canQuote)}${action('decline','说明无法受理',!canQuote)}</div>`;
     }
     if(tab==='quote'){
-      body=d.currentQuote?quoteView(d.currentQuote):msg('尚无有效报价。评估免费；客户接受报价后再安排预约。');body+=action('quote','提供新版逐件报价',!canQuote);
+      body=d.currentQuote?quoteView(d.currentQuote):msg('尚无有效报价。评估免费；客户接受报价后再安排预约。');body+=action('quote','提供新版逐件报价',!canQuote)+action('quoteAssist','车型与搬运测算',!canQuote);
       if(!canQuote)body+=msg('已接受、待补资料或已结束的申请不能直接覆盖报价。');
     }
     if(tab==='booking'){
@@ -93,7 +93,7 @@ window.ServiceDispatchAdmin = (() => {
       if(action==='cost'){title='登记实际发生成本';body=amount('amount','已发生金额（A$）')+field('description','成本说明')+field('reference','对应凭证编号（不填银行卡号）')+field('incurred','发生时间（本机时间）','datetime-local',localDate(Date.now()))+msg('登记实际成本不会直接扣客户费用。取消仍由客户核对当前规则下的费用预览。');}
     }
     const dialog=$('sdDialog');dialog.innerHTML=`<h3 id="sdDialogTitle">${title}</h3>${msg(f.items.map(i=>i.name).join('、'))}<form id="sdForm"><div class="sc-form-grid">${body}</div><label class="sc-check"><input type="checkbox" name="checked" required>我已核对清单、金额与实际安排。</label><p id="sdFormError" class="sc-error" role="alert"></p><div class="sc-footer">${btn('close','取消')}<button class="sc-primary">核对本次提交</button></div></form>`;
-    if(action==='quote')for(const fee of d.currentQuote?.fees||[])addFee(fee);dialog.showModal();
+    if(action==='quote'){for(const fee of d.currentQuote?.fees||[])addFee(fee);loadQuoteTemplates(d.id,d.revision);}dialog.showModal();
     $('sdForm').onsubmit=e=>{e.preventDefault();try{const command=make(action,id,new FormData(e.currentTarget));confirmation({title,scope,revision,command,action});}catch(error){$('sdFormError').textContent=error.message;}};
   }
   function addFee(f={label:'',amountCents:null}){const e=document.createElement('div');e.className='sd-fee sc-form-grid';e.innerHTML=field('feeLabel','费用名称','text',f.label)+amount('feeAmount','金额（A$）',f.amountCents===null?'':f.amountCents/100)+btn('removeFee','移除此项');$('sdFeeRows').append(e);}
@@ -104,6 +104,13 @@ window.ServiceDispatchAdmin = (() => {
     if(a==='resources')return {action:'CONFIRM_RESOURCES',planId:id,vehicleRef:s('vehicleRef'),crewRefs:s('crewRefs').split('\n').map(s=>s.trim()).filter(Boolean),warehouseRef:s('warehouseRef')||null,supplierConfirmation:s('confirmation')};
     if(a==='unavailable')return {action:'RESOURCE_UNAVAILABLE',reason:s('reason')};
     if(a==='cost')return {action:'RECORD_COST',costId:uid(),amountCents:m('amount'),description:s('description'),evidenceReference:s('reference'),incurredAt:stamp('incurred')};
+  }
+  async function loadQuoteTemplates(requestId,revision){
+    const g=generation,t=authToken;
+    try{const result=await api('/service-operations/management/templates');if(!current(g,t)||selected!==requestId||detail.revision!==revision||!$('sdForm'))return;const rows=result.items.filter(x=>x.serviceKind===detail.form.kind);if(!rows.length)return;
+      const box=document.createElement('div');box.className='sc-card';box.id='sdTemplatePicker';box.innerHTML='<label>经营报价模板 <select id="sdTemplateId"><option value="">选择模板</option>'+rows.map(x=>'<option value="'+esc(x.id)+'">'+esc(x.title)+' · '+esc(x.region)+'</option>').join('')+'</select></label><label class="sc-check"><input id="sdTemplateRegionConfirmed" type="checkbox">已核对本单区域、接收品类和模板适用范围</label><button id="sdApplyTemplate" type="button">带入条款与参考预约款</button><p>仅填写当前草稿；不改逐件估值，不预订资源，不向客户发送。</p>';$('sdForm').prepend(box);
+      $('sdApplyTemplate').onclick=()=>{const x=rows.find(r=>r.id===$('sdTemplateId').value);if(!x||!$('sdTemplateRegionConfirmed').checked){$('sdFormError').textContent='请选择模板并核对适用范围。';return;}const form=$('sdForm');form.elements.vehicle.value=x.vehicle;form.elements.reservation.value=x.reservationCents/100;for(const k of ['reservationTerms','storageTerms','cancellationTerms'])form.elements[k].value=x[k];form.elements.notes.value=[x.conditionTerms,x.damageTerms,x.unsoldTerms,x.pricingNote].join('；');$('sdFormError').textContent='已带入草稿。请核对所有收费和逐件估值，再通过原报价确认步骤发送。';};
+    }catch(e){if(current(g,t)&&$('sdFormError'))$('sdFormError').textContent='模板暂未加载；可以手动填写报价。';}
   }
   function confirmation(c){const old=$('sdForm');old.hidden=true;const box=document.createElement('div');box.id='sdConfirm';const fields=[...old.querySelectorAll('.sc-field')].map(el=>kv(el.querySelector('span').textContent,el.querySelector('select')?.selectedOptions[0]?.textContent||el.querySelector('input,textarea')?.value||''));box.innerHTML=`<p class="sc-notice">核对后再提交；这一步不代表客户已接受、预约已付款或实际取货完成。</p>${c.command.quote?quoteView(c.command.quote):fields.join('')}<div class="sc-footer">${btn('edit','返回修改')}<button type="button" class="sc-primary" id="sdCommit">确认提交</button></div>`;$('sdDialog').append(box);
     $('sdCommit').onclick=()=>{if(blocked())return;pending={scope:c.scope,title:c.title,path:c.scope==='booking'?`/service-bookings/${booking.id}/operator`:c.action==='quote'?`/service-requests/${selected}/quote`:`/service-bookings/admin/requests/${selected}/review`,body:{operationId:uid(),revision:c.revision,...c.command}};send();};
@@ -122,7 +129,7 @@ window.ServiceDispatchAdmin = (() => {
   document.addEventListener('click',async e=>{const x=e.target.closest('[data-sd-action],[data-sd-open],[data-sd-tab],[data-sd-mode],[data-sd-schedule-open]');if(!x||x.disabled||!$('serviceDispatchSection')?.contains(x))return;try{
     if(x.dataset.sdMode)return changeMode(x.dataset.sdMode);if(x.dataset.sdOpen)return openDetail(x.dataset.sdOpen);if(x.dataset.sdTab){if(!blocked()){tab=x.dataset.sdTab;renderDetail();}return;}
     if(x.dataset.sdScheduleOpen){if(blocked())return;await changeMode('requests');await openDetail(x.dataset.sdScheduleOpen);tab='booking';renderDetail();return;}
-    const a=x.dataset.sdAction;if(a==='resourceManager'){if(blocked())return;const id=x.dataset.id;await showSection('serviceResources');return window.ServiceResourcesAdmin.selectBooking(id);}if(a==='fieldManager'){if(blocked())return;const id=x.dataset.id;await showSection('serviceField');return window.ServiceFieldAdmin.open(id);}if(a==='retry')return send();if(a==='refresh'){if(busy||loadingDetail)return;const g=generation,t=authToken;if(mode==='requests'){await refreshDetail();if(current(g,t))await loadList(listCursor);}else await loadSchedule(listCursor);return;}
+    const a=x.dataset.sdAction;if(a==='quoteAssist'){if(blocked())return;const id=selected,revision=detail.revision;return window.ServiceQuoteAssist.open({detail,api,onUse:(v,result)=>{if(!detail||selected!==id||detail.revision!==revision)return;form('quote');$('sdForm').elements.vehicle.value=v.name;$('sdFeeRows').replaceChildren();for(const fee of v.fees.filter(f=>f.amountCents>0))addFee(fee);$('sdForm').elements.notes.value=result.notice;$('sdFormError').textContent='已带入车型与运输费用，替换旧费用明细。请补充未包含的费用，并重新核对逐件回收价、寄卖价与条款；尚未发送给客户。';}});}if(a==='resourceManager'){if(blocked())return;const id=x.dataset.id;await showSection('serviceResources');return window.ServiceResourcesAdmin.selectBooking(id);}if(a==='fieldManager'){if(blocked())return;const id=x.dataset.id;await showSection('serviceField');return window.ServiceFieldAdmin.open(id);}if(a==='retry')return send();if(a==='refresh'){if(busy||loadingDetail)return;const g=generation,t=authToken;if(mode==='requests'){await refreshDetail();if(current(g,t))await loadList(listCursor);}else await loadSchedule(listCursor);return;}
     if(a==='first'||a==='next'){if(blocked())return;return mode==='requests'?loadList(a==='next'?nextCursor:undefined):loadSchedule(a==='next'?nextCursor:undefined);}
     if(a==='close'){$('sdDialog').close();$('sdDialog').replaceChildren();return;}if(a==='edit'){$('sdConfirm').remove();$('sdForm').hidden=false;return;}if(a==='addFee')return addFee();if(a==='removeFee')return x.closest('.sd-fee').remove();if(a==='photo')return photo(x.dataset.id);if(!blocked())form(a,x.dataset.id);
     }catch(error){status(error.message,true);}});

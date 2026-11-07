@@ -2130,6 +2130,7 @@ function getAdminRootUrl() {
 
 function clearAdminSession() {
   window.ServiceResourcesAdmin?.clear();
+  window.ServiceWarehouseAdmin?.clear();
   window.ServiceFieldAdmin?.clear();
   window.ServiceOperationsAdmin?.clear();
   window.ServiceDispatchAdmin?.clear();
@@ -2201,6 +2202,7 @@ async function logout() {
 
 async function showSection(sectionName) {
   if (window.ServiceOperationsAdmin?.hasPending()) { alert('配送整屋模块还有待确认操作，请先核对原结果。'); return; }
+  if (sectionName !== 'serviceWarehouse') window.ServiceWarehouseAdmin?.clear();
   if (sectionName !== 'serviceResources') window.ServiceResourcesAdmin?.clear();
   if (sectionName !== 'serviceOperations') window.ServiceOperationsAdmin?.clear();
   if (sectionName !== 'serviceField') window.ServiceFieldAdmin?.clear();
@@ -2235,6 +2237,9 @@ async function showSection(sectionName) {
   clearSelections();
 
   switch (sectionName) {
+    case 'serviceWarehouse':
+      await window.ServiceWarehouseAdmin?.open();
+      break;
     case 'serviceResources':
       await window.ServiceResourcesAdmin?.open();
       break;

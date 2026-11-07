@@ -1,4 +1,24 @@
 {
   "adminCommit": "7afe20e34c5d39943dce05ead829df1b9d8aa1fe",
-  "backendCommit": "bb2dafb16b33898c44bff50bf6208156c7e4ab64"
+  "backendCommit": "bb2dafb16b33898c44bff50bf6208156c7e4ab64",
+  "includesUncommittedLatestSource": true,
+  "backendManifestSha256": "e4c5c56eaa3090c92e52d742032fe5f367599cc510ffa775f3cc5a64ab37a718",
+  "fileHashes": {
+    "app.js": "6c6da3ead97c3a602b703612eeeae625ca060a18934c5a2e838b7667cabc30f8",
+    "index.html": "eab147371212e617884ac2290388d6a939fd21fb0eca7e916e760af248873cfa",
+    "service-commerce.js": "a77feaac57e622b828fd3a095087f17db9e8bb01dfe2f30f303fd7d135d0ca75",
+    "service-commerce.css": "15dfc1dca670f1d14af1634fb60aafd78e7acafeff94606b049b594f8dbfa844",
+    "service-dispatch.js": "b6e28c75d1345d6766a535ccbdf1d6fcff099184f4e9b1484f4e847538766fa2",
+    "service-dispatch.css": "200faec9aa855b1cdfe0b42a90345ea935be45e02b50ad5643f71fd853086597",
+    "service-field.js": "b7c75665b7f8b9853c816d3de4d9388ba205879f066560ebd1251dd51efb637a",
+    "service-field.css": "8cea3b5acd8033e3c9e1cf0ee37346f528cc18e918cd3b975b08c9c8b93403ea",
+    "service-resources.js": "ba6e3d051130a748aeb14054b49f8021f11581613a1e1ce6454b66b8b93cdf33",
+    "service-resources.css": "26031adebf561c2151c7d353fd243de651ec77fca3c3fd7a873f6de45dab2758",
+    "service-operations.js": "b7e4f08c3049c140373600c13d8060a2bad6ad3ddb0df050b4a4c8073057f5be",
+    "service-operations.css": "47408009d273cd4d6ac7d2a239592c9fccd7b3337c7126502097c625fc6b9dee",
+    "service-warehouse.js": "d20c4944cbb72db30c5731591aaf886aa627900d84e13bb5231be643257c33fc",
+    "service-quote-assist.js": "6cd17602e5e282d2afdafe66ed43004eb9ffebd887ea9423ad120f8f7934d70b",
+    "service-staff.html": "56416b79ee9eb93e12aa77640819f5f3499a0fa7f4392d14a84b212fbcf6639a",
+    "service-staff.js": "af322bf3bf153171779e6188d069a44e2b0b01ca3fc5c73c88310a44ef18fac5"
+  }
 }

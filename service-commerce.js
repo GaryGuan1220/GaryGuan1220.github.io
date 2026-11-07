@@ -6,7 +6,7 @@ window.ServiceCommerceAdmin = (() => {
   const money = n => new Intl.NumberFormat('en-AU',{style:'currency',currency:'AUD'}).format((n||0)/100);
   const time = x => x ? new Date(x).toLocaleString('zh-CN',{hour12:false}) : '—';
   const uid = () => crypto.randomUUID();
-  const labels = {STORE:'寄存',CONSIGN:'寄卖',BUYOUT:'直接回收',AWAITING_RECEIPT:'待入库',RECEIPT_EXCEPTION:'入库差异',IN_STORAGE:'保管中',STORED:'寄存中',STORED_PENDING_TERMS:'待确认委托',READY_FOR_LISTING:'待上架',AWAITING_CONSIGNMENT_AUTH:'待寄卖授权',RETURN_REQUESTED:'申请取回',TERMS_OFFERED:'委托待确认',CONSIGNMENT_EXPIRED:'寄卖委托已到期',STORAGE_EXPIRED:'寄存已到期',BUYOUT_PAYMENT_HOLD:'回收待结算',PARTIALLY_OUTBOUND:'已部分出库',ISSUE:'有待处理问题',OUTBOUND_PENDING:'出库进行中',OUTBOUND_COMPLETE:'全部已出库',LISTED:'已上架',SALE_RESERVED:'购买占用中',AWAITING_SETTLEMENT:'待结算',PAYOUT_PROCESSING:'回款处理中',PAYOUT_SENT:'已核账待到账确认',PAYOUT_RECEIVED:'货主已确认到账',OFFERED:'待领取人确认',ACCEPTED:'已授权待出库',DISPATCHED:'已出库待收货',RECEIVED:'已确认收到',CANCELLED:'已取消',PROPOSED:'待货主授权',AUTHORIZED:'待审核发布',PUBLISHED:'已公开上架',WITHDRAWN:'已停止展示',RESERVED:'预约未付款',CONFIRMED:'已确认购买',DELIVERED:'已收货',REQUESTED:'待处理',PROCESSING:'处理中',UNKNOWN:'结果待核实',FAILED:'已核实失败',SENT:'核账完成待确认',PENDING:'待处理',DECLINED:'已拒绝',RESOLVED:'已处理',FEE_RECEIPT:'服务预付款入账',FEE_REFUND:'服务费退款',SALE_RECEIPT:'寄卖货款入账',SALE_REFUND:'寄卖货款退款',PAYOUT:'寄卖回款',RETURN:'取回',EXTEND:'续存'};
+  const labels = {SPLIT:'已拆为逐件记录 · 原批次只读',STORE:'寄存',CONSIGN:'寄卖',BUYOUT:'直接回收',AWAITING_RECEIPT:'待入库',RECEIPT_EXCEPTION:'入库差异',IN_STORAGE:'保管中',STORED:'寄存中',STORED_PENDING_TERMS:'待确认委托',READY_FOR_LISTING:'待上架',AWAITING_CONSIGNMENT_AUTH:'待寄卖授权',RETURN_REQUESTED:'申请取回',TERMS_OFFERED:'委托待确认',CONSIGNMENT_EXPIRED:'寄卖委托已到期',STORAGE_EXPIRED:'寄存已到期',BUYOUT_PAYMENT_HOLD:'回收待结算',PARTIALLY_OUTBOUND:'已部分出库',ISSUE:'有待处理问题',OUTBOUND_PENDING:'出库进行中',OUTBOUND_COMPLETE:'全部已出库',LISTED:'已上架',SALE_RESERVED:'购买占用中',AWAITING_SETTLEMENT:'待结算',PAYOUT_PROCESSING:'回款处理中',PAYOUT_SENT:'已核账待到账确认',PAYOUT_RECEIVED:'货主已确认到账',OFFERED:'待领取人确认',ACCEPTED:'已授权待出库',DISPATCHED:'已出库待收货',RECEIVED:'已确认收到',CANCELLED:'已取消',PROPOSED:'待货主授权',AUTHORIZED:'待审核发布',PUBLISHED:'已公开上架',WITHDRAWN:'已停止展示',RESERVED:'预约未付款',CONFIRMED:'已确认购买',DELIVERED:'已收货',REQUESTED:'待处理',PROCESSING:'处理中',UNKNOWN:'结果待核实',FAILED:'已核实失败',SENT:'核账完成待确认',PENDING:'待处理',DECLINED:'已拒绝',RESOLVED:'已处理',FEE_RECEIPT:'服务预付款入账',FEE_REFUND:'服务费退款',SALE_RECEIPT:'寄卖货款入账',SALE_REFUND:'寄卖货款退款',PAYOUT:'寄卖回款',RETURN:'取回',EXTEND:'续存'};
   const label = x => labels[x] || x || '—';
   let epoch=0, listSeq=0, detailSeq=0, active=false, busy=false, pending=null, detail=null, selected=null, tab='overview', nextCursor=null, listCursor=null;
   const controllers=new Set(),urls=new Set(),viewed=new Set();
@@ -53,7 +53,7 @@ window.ServiceCommerceAdmin = (() => {
     }catch(e){if(isCurrent(g,t)&&seq===detailSeq)status(e.message,true);}
   }
   function renderDetail(){
-    const {inventory:i,flow:f}=detail;const tabs=[['overview','概览与委托'],['bills','费用账单'],['release','实际出库'],['listing','寄卖审核'],['funds','核账与回款'],['issues','问题与记录']];
+    const {inventory:i,flow:f}=detail;if(i.splitChildIds){$('scDetail').innerHTML=card(i.name,message('原批次已拆为逐件记录，仅供追溯，不再出账或出售。')+i.splitChildIds.map(id=>`<button class="sc-row" type="button" data-sc-open="${esc(id)}">查看单件 · ${esc(id.slice(-6))}</button>`).join('')+kv('原首次入库',time(i.firstReceivedAt)));return;}const tabs=[['overview','概览与委托'],['bills','费用账单'],['release','实际出库'],['listing','寄卖审核'],['funds','核账与回款'],['issues','问题与记录']];
     const header=card(i.name,kv('库存编号',i.id)+kv('货主 / 类型',`#${i.ownerId} / ${label(i.kind)}`)+kv('剩余数量',`${f?.remainingQuantity??i.receipt?.quantity??0} 件`)+message(detail.unavailableReason||'所有确认使用当前记录；并发更新会要求重新核对。'));
     const b=(a,t,off=false,extra='')=>button(a,t,off||busy||!!pending,extra);
     const commerceOff=!f||!detail.commerceEnabled,inventoryOff=!detail.inventoryEnabled,financialOff=commerceOff||!detail.manualReconciliationEnabled;
@@ -118,7 +118,7 @@ window.ServiceCommerceAdmin = (() => {
       case 'bill':title='生成仓储账单';html=field('to','账单截至（本机时间）','datetime-local',localDate(Date.now()))+select('final','账单类型',[['false','阶段账单'],['true','最终账单（全部实际出库后）']]);break;
       case 'return':title='提供货主取回方案';html=select('requestId','关联取回申请',i.requests.filter(q=>q.kind==='RETURN'&&['PENDING','PROCESSING'].includes(q.status)).map(q=>[q.id,`${q.quantity} 件 · ${q.requestedDate}`]))+quantity('quantity','本次出库数量')+field('volume','出库后剩余体积（m³）','number','','min="0" max="1000" step="0.001"')+decimal('fee','本次取回服务费（A$）')+select('handling','付款安排',[['PREPAID','先核实结清费用'],['DEFERRED','明确约定后付']])+field('recipient','领取人')+field('window','预约时段 / 地点说明')+field('expires','授权有效至','datetime-local',expiry)+notes();break;
       case 'saleRelease':title='安排寄卖买家自取';html=field('window','仓库地址与预约时段')+field('expires','授权有效至','datetime-local',expiry);break;
-      case 'dispatch':title='登记实际出库';html=message('只有已经核对领取人并完成实物交付后提交。此操作扣减库存；由领取人另行确认收到。')+photoChecks()+notes();break;
+      case 'dispatch':title='登记实际出库';html=(detail.pickupAuthorizations||[]).filter(g=>g.releaseId===id).map(g=>message('代取人：'+g.recipientName+' · 手机尾号 '+g.phoneLast4+' · 有效至 '+time(g.expiresAt))).join('')+message('只有已经核对领取人并完成实物交付后提交。此操作扣减库存；由领取人另行确认收到。')+field('unitIds','本次实物标签（已编号物品须逐件填写，每行一个 RU 编号；未编号可留空）','textarea').replace(' required','')+field('pickupCode','代取领取码（没有代取授权可留空）').replace(' required','')+'<label class="sc-check"><input type="checkbox" name="recipientChecked">如为代取，已按授权记录核对代取人姓名与手机尾号</label>'+photoChecks()+notes();break;
       case 'listing':title='准备寄卖资料';html=field('title','公开商品名称','text',i.name)+field('description','公开描述','textarea')+decimal('price','本条库存整批售价（A$）')+field('region','公开区域（不填私人详细地址）')+photoChecks();break;
       case 'publish':if(!f.listing.photoIds.every(x=>viewed.has(x)))throw new Error('请先点击“核查本次全部商品照片”，逐张查看后审核。');title='审核通过并上架';html=message(`本次上架：${f.listing.title}，${f.listing.quantity} 件，${money(f.listing.priceCents)}。货主已授权本版本。`)+notes();break;
       case 'withdraw':title='停止公开展示';html=notes();break;
@@ -148,7 +148,7 @@ window.ServiceCommerceAdmin = (() => {
       case 'bill':return {action:'ISSUE_BILL',to:stamp('to'),final:s('final')==='true'};
       case 'return':return {action:'OFFER_RELEASE',releaseId:uid(),requestId:s('requestId'),quantity:n('quantity'),remainingVolumeLitres:number(s('volume'),1000),feeCents:m('fee'),feeHandling:s('handling'),window:s('window'),expiresAt:stamp('expires'),recipient:s('recipient'),note:s('note')};
       case 'saleRelease':return {action:'PREPARE_SALE_RELEASE',releaseId:uid(),window:s('window'),expiresAt:stamp('expires')};
-      case 'dispatch':return {action:'DISPATCH',releaseId:id,evidenceIds:photos(),note:s('note')};
+      case 'dispatch':return {action:'DISPATCH',releaseId:id,...(s('unitIds')?{unitIds:s('unitIds')}:{}),...(s('pickupCode')?{pickupCode:s('pickupCode'),recipientChecked:!!d.get('recipientChecked')}:{}),evidenceIds:photos(),note:s('note')};
       case 'listing':return {action:'PROPOSE_LISTING',listingId:uid(),title:s('title'),description:s('description'),priceCents:m('price'),region:s('region'),photoIds:photos()};
       case 'publish':return {action:'PUBLISH',listingId:detail.flow.listing.id,reviewNote:s('note')};
       case 'withdraw':return {action:'WITHDRAW_LISTING',reason:s('note')};
@@ -193,5 +193,5 @@ window.ServiceCommerceAdmin = (() => {
     }catch(error){status(error.message,true);}
   }
   document.addEventListener('click',handle);
-  return {open,clear};
+  return {open,clear,openRecord:openDetail};
 })();
